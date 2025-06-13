@@ -1,5 +1,5 @@
 <?php
-require_once '../src/models/DatabaseModel.php';
+require_once __DIR__ . '/../models/DatabaseModel.php';
 
 class MainController {
     private $model;
@@ -44,7 +44,7 @@ class MainController {
         $procedures = $this->model->getAllProcedures();
         $tables = $this->model->getTableList();
         
-        include '../src/views/dashboard.php';
+        include __DIR__ . '/../views/dashboard.php';
     }
 
     private function testFunction() {
@@ -58,7 +58,6 @@ class MainController {
         $functionName = $_POST['function_name'] ?? '';
         $params = [];
         
-        // Parse parameters
         for ($i = 1; $i <= 5; $i++) {
             $paramValue = $_POST["param{$i}"] ?? '';
             if ($paramValue !== '') {
@@ -81,7 +80,6 @@ class MainController {
         $procedureName = $_POST['procedure_name'] ?? '';
         $params = [];
         
-        // Parse parameters
         for ($i = 1; $i <= 5; $i++) {
             $paramValue = $_POST["param{$i}"] ?? '';
             if ($paramValue !== '') {
@@ -106,24 +104,22 @@ class MainController {
     private function getStats() {
         header('Content-Type: application/json');
         
-        $result = $this->model->getDashboardStats();
-        echo json_encode($result);
+        $stats = $this->model->getDashboardStats();
+        echo json_encode(['success' => true, 'data' => $stats]);
     }
 
     private function getRecentActivities() {
         header('Content-Type: application/json');
         
-        $limit = $_GET['limit'] ?? 20;
-        $result = $this->model->getRecentActivities($limit);
-        echo json_encode($result);
+        $activities = $this->model->getRecentActivities();
+        echo json_encode(['success' => true, 'data' => $activities]);
     }
 
     private function getPointsHistory() {
         header('Content-Type: application/json');
         
-        $limit = $_GET['limit'] ?? 20;
-        $result = $this->model->getPointsHistory($limit);
-        echo json_encode($result);
+        $history = $this->model->getPointsHistory();
+        echo json_encode(['success' => true, 'data' => $history]);
     }
 }
 ?>

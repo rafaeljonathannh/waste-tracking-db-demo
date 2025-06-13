@@ -1,5 +1,5 @@
 <?php
-require_once '../src/config/database.php';
+require_once __DIR__ . '/../config/database.php';
 
 class DatabaseModel {
     private $db;
@@ -9,8 +9,6 @@ class DatabaseModel {
         $this->db = $database->getConnection();
     }
 
-    // ========== FUNCTIONS TESTING ==========
-    
     public function getAllFunctions() {
         return [
             'total_poin_mahasiswa' => 'Total Poin Mahasiswa (stud_id)',
@@ -29,18 +27,16 @@ class DatabaseModel {
     }
 
     public function testFunction($functionName, $params) {
-        $database = new Database();
-        $db = $database->getConnection();
-        
         try {
             $placeholders = str_repeat('?,', count($params));
             $placeholders = rtrim($placeholders, ',');
             
             $sql = "SELECT {$functionName}({$placeholders}) as result";
-            $stmt = $db->prepare($sql);
+            $stmt = $this->db->prepare($sql);
             $stmt->execute($params);
             
             $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            
             return [
                 'success' => true,
                 'result' => $result['result'],
@@ -51,23 +47,21 @@ class DatabaseModel {
             return [
                 'success' => false,
                 'error' => $e->getMessage(),
-                'query' => $sql,
+                'query' => $sql ?? 'N/A',
                 'params' => $params
             ];
         }
     }
 
-    // ========== STORED PROCEDURES TESTING ==========
-    
     public function getAllProcedures() {
         return [
             'sp_redeem_reward' => 'Redeem Reward (user_id, reward_id)',
             'sp_laporkan_aktivitas_sampah' => 'Laporkan Aktivitas Sampah (user_id, bin_id, weight, status)',
-            'sp_ikut_kampanye' => 'Ikut Kampanye (user_id, campaign_id)',
-            'sp_update_student_status' => 'Update Student Status (user_id)',
             'sp_generate_student_summary' => 'Generate Student Summary (user_id)',
+            'sp_update_student_status' => 'Update Student Status (user_id)',
             'sp_add_bin_check_capacity' => 'Add Bin Check Capacity (location_id, capacity_kg, bin_code)',
-            'sp_complete_redemption' => 'Complete Redemption (redemption_id)'
+            'sp_complete_redemption' => 'Complete Redemption (redemption_id)',
+            'sp_create_campaign_with_coordinator_check' => 'Create Campaign with Coordinator Check (staff_id, faculty_id, name, description, start_date, end_date)'
         ];
     }
 
@@ -98,14 +92,12 @@ class DatabaseModel {
             return [
                 'success' => false,
                 'error' => $e->getMessage(),
-                'query' => $sql,
+                'query' => $sql ?? 'N/A',
                 'params' => $params
             ];
         }
     }
 
-    // ========== DATA VIEWER ==========
-    
     public function getTableData($tableName, $limit = 50) {
         try {
             $allowedTables = [
@@ -122,12 +114,19 @@ class DatabaseModel {
             $stmt = $this->db->prepare($sql);
             $stmt->execute([$limit]);
             
+            $data = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            $countSql = "SELECT COUNT(*) as total FROM {$tableName}";
+            $countStmt = $this->db->prepare($countSql);
+            $countStmt->execute();
+            $total = $countStmt->fetch(PDO::FETCH_ASSOC)['total'];
+            
             return [
                 'success' => true,
-                'data' => $stmt->fetchAll(PDO::FETCH_ASSOC),
-                'count' => $stmt->rowCount()
+                'data' => $data,
+                'count' => $total
             ];
-        } catch(Exception $e) {
+        } catch (Exception $e) {
             return [
                 'success' => false,
                 'error' => $e->getMessage()
@@ -136,122 +135,73 @@ class DatabaseModel {
     }
 
     public function getTableList() {
-        return [
-            'student' => 'Students',
-            'staff' => 'Staff',
-            'faculty' => 'Faculties', 
-            'faculty_department' => 'Departments',
-            'byn' => 'Points (BYN)',
-            'recyclingactivity' => 'Recycling Activities',
-            'rewardredemption' => 'Reward Redemptions',
-            'reward_item' => 'Reward Items',
-            'sustainability_campaign' => 'Campaigns',
-            'recyclebin' => 'Recycle Bins',
-            'byn_location' => 'Locations'
-        ];
-    }
-
-    // ========== TRIGGER MONITORING ==========
-    
-    public function getRecentActivities($limit = 20) {
         try {
-            $sql = "
-                SELECT 
-                    'recycling_activity' as type,
-                    activity_id as id,
-                    user_id,
-                    weight_kg as value,
-                    status,
-                    date as timestamp
-                FROM recyclingactivity 
-                ORDER BY activity_id DESC 
-                LIMIT ?
-            ";
-            $stmt = $this->db->prepare($sql);
-            $stmt->execute([$limit]);
-            
-            return [
-                'success' => true,
-                'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)
-            ];
-        } catch(PDOException $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
+            $stmt = $this->db->query("SHOW TABLES");
+            $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            return $tables;
+        } catch (Exception $e) {
+            return [];
         }
     }
 
-    public function getPointsHistory($limit = 20) {
-        try {
-            $sql = "
-                SELECT 
-                    b.byn_id,
-                    b.user_id,
-                    s.name as student_name,
-                    b.point_amount,
-                    b.timestamp,
-                    b.campaign_id
-                FROM byn b
-                LEFT JOIN student s ON b.user_id = s.stud_id
-                ORDER BY b.timestamp DESC 
-                LIMIT ?
-            ";
-            $stmt = $this->db->prepare($sql);
-            $stmt->execute([$limit]);
-            
-            return [
-                'success' => true,
-                'data' => $stmt->fetchAll(PDO::FETCH_ASSOC)
-            ];
-        } catch(PDOException $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
-        }
-    }
-
-    // ========== DASHBOARD STATS ==========
-    
     public function getDashboardStats() {
         try {
             $stats = [];
             
-            // Total Students
-            $sql = "SELECT COUNT(*) as count FROM student";
-            $stmt = $this->db->query($sql);
+            $stmt = $this->db->query("SELECT COUNT(*) as count FROM student");
             $stats['total_students'] = $stmt->fetch()['count'];
             
-            // Active Students
-            $sql = "SELECT COUNT(*) as count FROM student WHERE status = 'active'";
-            $stmt = $this->db->query($sql);
-            $stats['active_students'] = $stmt->fetch()['count'];
+            $stmt = $this->db->query("SHOW FUNCTION STATUS WHERE Db = 'fp_mbd'");
+            $stats['total_functions'] = $stmt->rowCount();
             
-            // Total Points Distributed
-            $sql = "SELECT IFNULL(SUM(point_amount), 0) as total FROM byn";
-            $stmt = $this->db->query($sql);
-            $stats['total_points'] = $stmt->fetch()['total'];
+            $stmt = $this->db->query("SHOW PROCEDURE STATUS WHERE Db = 'fp_mbd'");
+            $stats['total_procedures'] = $stmt->rowCount();
             
-            // Total Activities
-            $sql = "SELECT COUNT(*) as count FROM recyclingactivity";
-            $stmt = $this->db->query($sql);
-            $stats['total_activities'] = $stmt->fetch()['count'];
+            $stmt = $this->db->query("SHOW TABLES");
+            $stats['total_tables'] = $stmt->rowCount();
             
-            // Verified Activities
-            $sql = "SELECT COUNT(*) as count FROM recyclingactivity WHERE status = 'verified'";
-            $stmt = $this->db->query($sql);
-            $stats['verified_activities'] = $stmt->fetch()['count'];
-            
+            return $stats;
+        } catch (Exception $e) {
             return [
-                'success' => true,
-                'stats' => $stats
+                'total_students' => 0,
+                'total_functions' => 0,
+                'total_procedures' => 0,
+                'total_tables' => 0
             ];
-        } catch(PDOException $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage()
-            ];
+        }
+    }
+
+    public function getRecentActivities($limit = 10) {
+        try {
+            $sql = "SELECT ra.*, s.name as student_name, sc.name as campaign_name 
+                    FROM recyclingactivity ra
+                    LEFT JOIN student s ON ra.user_id = s.stud_id
+                    LEFT JOIN sustainability_campaign sc ON ra.campaign_id = sc.campaign_id
+                    ORDER BY ra.timestamp DESC LIMIT ?";
+            
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$limit]);
+            
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            return [];
+        }
+    }
+
+    public function getPointsHistory($limit = 10) {
+        try {
+            $sql = "SELECT b.*, s.name as student_name, sc.name as campaign_name 
+                    FROM byn b
+                    LEFT JOIN student s ON b.user_id = s.stud_id
+                    LEFT JOIN sustainability_campaign sc ON b.campaign_id = sc.campaign_id
+                    ORDER BY b.timestamp DESC LIMIT ?";
+            
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute([$limit]);
+            
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Exception $e) {
+            return [];
         }
     }
 }
