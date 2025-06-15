@@ -1,2530 +1,1792 @@
--- phpMyAdmin SQL Dump
--- version 5.2.1
--- https://www.phpmyadmin.net/
---
--- Host: 127.0.0.1
--- Generation Time: Jun 10, 2025 at 09:34 AM
--- Server version: 10.4.32-MariaDB
--- PHP Version: 8.2.12
-
-SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
-START TRANSACTION;
-SET time_zone = "+00:00";
-
-
-/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
-/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
-/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
-/*!40101 SET NAMES utf8mb4 */;
-
---
--- Database: `fp_mbd`
---
-
-DELIMITER $$
---
--- Procedures
---
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_add_bin_check_capacity` (IN `p_location_id` INT, IN `p_capacity_kg` DECIMAL(6,2), IN `p_bin_code` VARCHAR(50))   BEGIN
-    DECLARE v_total_capacity DECIMAL(10,2);
-
-
-    SET v_total_capacity = kapasitas_total_tempat_sampah(p_location_id);
-
-
-    IF (v_total_capacity + p_capacity_kg) > 1000 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Total capacity in this location would exceed 1000 kg.';
-    END IF;
-
-
-    INSERT INTO RECYCLEBIN(location_id, capacity_kg, bin_code)
-    VALUES (p_location_id, p_capacity_kg, p_bin_code);
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_complete_redemption` (IN `p_redemption_id` INT)   BEGIN
-    DECLARE v_item_id INT;
-
-
-    SELECT reward_item_id INTO v_item_id
-    FROM REWARDREDEMPTION
-    WHERE id = p_redemption_id AND status = 'pending';
-
-
-    IF v_item_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Redemption ID invalid or already processed.';
-    END IF;
-
-
-    -- Mark as completed
-    UPDATE REWARDREDEMPTION
-    SET status = 'completed',
-        processed_date = NOW()
-    WHERE id = p_redemption_id;
-
-
-    -- Decrease stock
-    UPDATE REWARD_ITEM
-    SET stock = stock - 1
-    WHERE id = v_item_id;
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_create_campaign_with_coordinator_check` (IN `p_staff_id` INT, IN `p_faculty_id` INT, IN `p_name` VARCHAR(255), IN `p_description` TEXT, IN `p_start_date` DATE, IN `p_end_date` DATE)   BEGIN
-    DECLARE v_count INT;
-
-
-    SET v_count = jumlah_koordinator_fakultas(p_faculty_id);
-
-
-    IF v_count = 0 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Faculty must have at least one coordinator.';
-    END IF;
-
-
-    INSERT INTO SUSTAINABILITY_CAMPAIGN(name, description, start_date, end_date, created_by)
-    VALUES (p_name, p_description, p_start_date, p_end_date, p_staff_id);
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_generate_student_summary` (IN `p_user_id` INT)   BEGIN
-    SELECT
-        total_poin_mahasiswa(p_user_id) AS total_points,
-        jumlah_kampanye_mahasiswa(p_user_id) AS total_campaigns_joined,
-        total_sampah_disetor(p_user_id) AS total_waste_kg,
-        jumlah_reward_ditukar(p_user_id) AS total_rewards_redeemed,
-        status_mahasiswa(p_user_id) AS status;
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_ikut_kampanye` (IN `p_user_id` INT, IN `p_campaign_id` INT)   BEGIN
-    IF ikut_kampanye(p_user_id, p_campaign_id) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Mahasiswa sudah terdaftar di kampanye ini.';
-    ELSE
-        INSERT INTO USER_SUSTAINABILITY_CAMPAIGN(user_id, campaign_id, status)
-        VALUES (p_user_id, p_campaign_id, 'active');
-    END IF;
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_laporkan_aktivitas_sampah` (IN `p_user_id` INT, IN `p_bin_id` INT, IN `p_weight` DECIMAL(5,2), IN `p_status` ENUM('pending','verified'))   BEGIN
-    DECLARE v_poin INT;
-
-
-    -- Insert activity
-    INSERT INTO RECYCLINGACTIVITY(user_id, recyclebin_id, weight_kg, status, timestamp)
-    VALUES (p_user_id, p_bin_id, p_weight, p_status, NOW());
-
-
-    -- Insert point if verified
-    IF p_status = 'verified' THEN
-        SET v_poin = fn_konversi_berat_ke_poin(p_weight);
-
-
-        INSERT INTO BYN(user_id, campaign_id, point_amount, timestamp)
-        VALUES (p_user_id, NULL, v_poin, NOW()); -- NULL if not tied to a campaign
-    END IF;
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_redeem_reward` (IN `p_user_id` INT, IN `p_reward_id` INT)   BEGIN
-    DECLARE v_status VARCHAR(20);
-    DECLARE v_required_points INT;
-    DECLARE v_discounted_points INT;
-    DECLARE v_total_points INT;
-
-
-    -- 1. Get student status
-    SET v_status = status_mahasiswa(p_user_id);
-
-
-    -- 2. Get reward cost
-    SELECT points_required INTO v_required_points
-    FROM REWARD_ITEM
-    WHERE reward_id = p_reward_id;
-
-
-    -- 3. Apply discount based on student status
-    SET v_discounted_points = fn_hitung_diskon_reward(v_status, v_required_points);
-
-
-    -- 4. Get total available points
-    SELECT total_points INTO v_total_points
-    FROM STUDENT
-    WHERE stud_id = p_user_id;
-
-
-    -- 5. Check if sufficient points
-    IF v_total_points IS NULL OR v_total_points < v_discounted_points THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient points for redemption';
-    END IF;
-
-
-    -- 6. Deduct points directly from STUDENT table
-    UPDATE STUDENT
-    SET total_points = total_points - v_discounted_points
-    WHERE stud_id = p_user_id;
-
-
-    -- 7. Insert redemption log
-    INSERT INTO REWARDREDEMPTION (user_id, reward_id, redeemed_at, status)
-    VALUES (p_user_id, p_reward_id, NOW(), 'completed');
-END$$
-
-CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_update_student_status` (IN `p_user_id` INT)   BEGIN
-    DECLARE v_last_activity TIMESTAMP;
-
-
-    SELECT MAX(timestamp) INTO v_last_activity
-    FROM RECYCLINGACTIVITY
-    WHERE user_id = p_user_id;
-
-
-    IF v_last_activity IS NULL OR v_last_activity < DATE_SUB(NOW(), INTERVAL 6 MONTH) THEN
-        UPDATE STUDENT SET status = 'inactive' WHERE stud_id = p_user_id;
-    ELSE
-        UPDATE STUDENT SET status = 'active' WHERE stud_id = p_user_id;
-    END IF;
-END$$
-
---
--- Functions
---
-CREATE DEFINER=`root`@`localhost` FUNCTION `fn_hitung_diskon_reward` (`status_input` VARCHAR(20), `poin_awal` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   IF status_input = 'active' THEN
-       RETURN ROUND(poin_awal * 0.9); -- 10% diskon
-   ELSE 
-       RETURN poin_awal;
-   END IF;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `fn_konversi_berat_ke_poin` (`berat_kg` DECIMAL(5,2)) RETURNS INT(11) DETERMINISTIC BEGIN
-   RETURN ROUND(berat_kg * 10);
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `ikut_kampanye` (`stud_id_input` INT, `campaign_id_input` INT) RETURNS TINYINT(1) DETERMINISTIC BEGIN
-   DECLARE jumlah INT;
-
-
-   SELECT COUNT(*) INTO jumlah
-   FROM USER_SUSTAINABILITY_CAMPAIGN
-   WHERE user_id = stud_id_input AND campaign_id = campaign_id_input;
-
-
-   RETURN jumlah > 0;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `jumlah_kampanye_mahasiswa` (`stud_id_input` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE total_kampanye INT DEFAULT 0;
-
-
-   SELECT COUNT(*)
-   INTO total_kampanye
-   FROM USER_SUSTAINABILITY_CAMPAIGN
-   WHERE user_id = stud_id_input AND status = 'active';
-
-
-   RETURN total_kampanye;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `jumlah_koordinator_fakultas` (`faculty_id_input` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE jumlah INT;
-
-
-   SELECT COUNT(*) INTO jumlah
-   FROM SUSTAINABILITY_COORDINATOR
-   WHERE faculty_id = faculty_id_input;
-
-
-   RETURN jumlah;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `jumlah_mahasiswa_aktif_fakultas` (`fac_id` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE jumlah INT DEFAULT 0;
-
-
-   SELECT COUNT(*)
-   INTO jumlah
-   FROM STUDENT
-   WHERE faculty_id = fac_id AND status = 'active';
-
-
-   RETURN jumlah;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `jumlah_reward_ditukar` (`stud_id_input` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE jumlah INT DEFAULT 0;
-
-
-   SELECT COUNT(*)
-   INTO jumlah
-   FROM REWARDREDEMPTION
-   WHERE user_id = stud_id_input AND status = 'approved';
-
-
-   RETURN jumlah;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `kampanye_dibuat_staff` (`staff_id_input` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE jumlah INT;
-
-
-   SELECT COUNT(*) INTO jumlah
-   FROM SUSTAINABILITY_CAMPAIGN
-   WHERE created_by = staff_id_input;
-
-
-   RETURN jumlah;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `kapasitas_total_tempat_sampah` (`loc_id` INT) RETURNS DECIMAL(10,2) DETERMINISTIC BEGIN
-   DECLARE total DECIMAL(10,2);
-
-
-   SELECT IFNULL(SUM(capacity_kg), 0)
-   INTO total
-   FROM RECYCLEBIN
-   WHERE location_id = loc_id;
-
-
-   RETURN total;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `status_mahasiswa` (`stud_id_input` INT) RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci DETERMINISTIC BEGIN
-   DECLARE status_result VARCHAR(20);
-
-
-   SELECT status INTO status_result
-   FROM STUDENT
-   WHERE stud_id = stud_id_input;
-
-
-   RETURN status_result;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `total_poin_mahasiswa` (`stud_id_input` INT) RETURNS INT(11) DETERMINISTIC BEGIN
-   DECLARE total_poin INT DEFAULT 0;
-
-
-   SELECT IFNULL(SUM(point_amount), 0)
-   INTO total_poin
-   FROM BYN
-   WHERE user_id = stud_id_input;
-
-
-   RETURN total_poin;
-END$$
-
-CREATE DEFINER=`root`@`localhost` FUNCTION `total_sampah_disetor` (`stud_id_input` INT) RETURNS DECIMAL(10,2) DETERMINISTIC BEGIN
-   DECLARE total_berat DECIMAL(10,2) DEFAULT 0;
-
-
-   SELECT IFNULL(SUM(weight_kg), 0)
-   INTO total_berat
-   FROM RECYCLINGACTIVITY
-   WHERE user_id = stud_id_input AND status = 'verified';
-
-
-   RETURN total_berat;
-END$$
-
-DELIMITER ;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `admin`
---
-
-CREATE TABLE `admin` (
-  `admin_id` int(11) NOT NULL,
-  `username` varchar(50) DEFAULT NULL,
-  `password` varchar(255) DEFAULT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `phone` varchar(20) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `admin`
---
-
-INSERT INTO `admin` (`admin_id`, `username`, `password`, `name`, `email`, `phone`, `status`) VALUES
-(1, 'admin1', 'rcf09*Dgh!', 'dr. Faizah Lailasari, S.Pt', 'cinta01@ud.or.id', '+62 (055) 957-8224', 'active'),
-(2, 'admin2', ')2E1ZOLjBY', 'Sakura Hutasoit', 'lanjar64@hotmail.com', '+62 (38) 164-1168', 'active'),
-(3, 'admin3', '7%d7Ae1zQ0', 'Harto Zulaika', 'galiono70@perum.mil.id', '+62 (09) 106-7390', 'active'),
-(4, 'admin4', 'U6OVJ!i5*o', 'Balangga Prakasa', 'martakatamba@cv.org', '+62 (46) 152-4561', 'active'),
-(5, 'admin5', 'o!2UBKkjEW', 'Danuja Saefullah, S.Pd', 'tedi66@gmail.com', '+62-697-749-5767', 'active'),
-(6, 'admin6', '$YW_Eno3h9', 'Hj. Jamalia Wastuti, S.H.', 'luwar85@hotmail.com', '+62 (203) 186-9891', 'active'),
-(7, 'admin7', 'm93BS3ce^R', 'Rika Dabukke', 'rmegantara@yahoo.com', '+62-021-937-5435', 'active'),
-(8, 'admin8', 'V(n2TsWym#', 'Puji Aryani', 'sakurasusanti@yahoo.com', '+62-0590-806-5006', 'active'),
-(9, 'admin9', 'm32AUE*s(L', 'Drs. Tina Novitasari', 'atarihoran@yahoo.com', '+62-56-802-6736', 'active'),
-(10, 'admin10', 'QB8L(Odb&a', 'Patricia Uyainah', 'latuponoelvin@cv.id', '+62 (028) 626-6780', 'active'),
-(11, 'admin11', '!^4a7NbW3F', 'Hardana Saragih', 'dewisitompul@gmail.com', '+62 (011) 373 5214', 'active'),
-(12, 'admin12', '6$Y2DAizDf', 'H. Rudi Melani, S.E.', 'cakrabirawa12@gmail.com', '+62-016-342-9768', 'active'),
-(13, 'admin13', 'VX8eNqr)o&', 'R.A. Ciaobella Aryani', 'manullangcahyanto@pd.my.id', '(0433) 590-9778', 'active'),
-(14, 'admin14', '*qJd0L*hQ6', 'Puji Wijayanti, S.Psi', 'muni41@hotmail.com', '+62-094-701-0842', 'active'),
-(15, 'admin15', '!0cUhIo+*D', 'Rahmi Manullang', 'maulanacici@pt.mil', '(0354) 184-4696', 'active'),
-(16, 'admin16', '*FOcT7vc40', 'Dt. Panca Rajasa, M.TI.', 'caraka95@cv.mil.id', '+62 (13) 678 8585', 'active'),
-(17, 'admin17', 'c&z3kCCx6v', 'Gangsar Mardhiyah, S.T.', 'cyuliarti@perum.net', '+62 (0308) 096-8790', 'active'),
-(18, 'admin18', 'D&do1ASzJ+', 'Zahra Natsir', 'ridwan87@gmail.com', '+62 (654) 125-6874', 'active'),
-(19, 'admin19', 'DYx69LSc&v', 'Ella Pudjiastuti', 'manullanggilang@cv.biz.id', '(000) 187 1363', 'active'),
-(20, 'admin20', 'E!64M_QTym', 'Puti Najwa Siregar, M.Kom.', 'balapati02@ud.gov', '(0805) 956 1054', 'active'),
-(21, 'admin21', 'yX%Easd^(3', 'Safina Wulandari', 'fpradana@perum.sch.id', '(0120) 070-8440', 'active'),
-(22, 'admin22', '!4RL9Mrsd3', 'R. Surya Hidayat', 'calista68@perum.com', '+62 (003) 609 1785', 'active'),
-(23, 'admin23', 'wB2OFKqn1@', 'Tgk. Rachel Winarsih, S.Gz', 'shariyah@yahoo.com', '(053) 413-2512', 'active'),
-(24, 'admin24', '(TY9aAKkW!', 'Cut Alika Pangestu, M.Farm', 'yani64@yahoo.com', '0824521604', 'active'),
-(25, 'admin25', ')IRZj6a_C9', 'Diah Usada', 'emil64@ud.sch.id', '(049) 109 9893', 'active'),
-(26, 'admin26', '*3laAAW2mC', 'Cut Ida Putra, S.Farm', 'pangestuega@gmail.com', '+62 (521) 411-6267', 'active'),
-(27, 'admin27', '^X7Wj2(g0a', 'H. Nardi Hassanah', 'gatra68@cv.net', '+62-025-469-3956', 'active'),
-(28, 'admin28', '0gb^2VvY!w', 'Karsa Handayani', 'dirjapudjiastuti@pt.int', '+62 (072) 856-8369', 'active'),
-(29, 'admin29', '1ZW2Rnpy%^', 'Makuta Sitorus', 'ibranimangunsong@pd.ponpes.id', '+62 (60) 820-6111', 'active'),
-(30, 'admin30', '#0&GTVAphm', 'Tgk. Suci Tarihoran', 'firmansyahbetania@hotmail.com', '+62 (20) 527-8600', 'active'),
-(31, 'admin31', '^9+HIpEb0x', 'Tantri Wastuti', 'irawanprakosa@yahoo.com', '+62 (11) 316-1839', 'active'),
-(32, 'admin32', 'X+5GauwE%s', 'dr. Emil Marpaung', 'prabawatampubolon@ud.desa.id', '(0651) 584-1796', 'active'),
-(33, 'admin33', 'Aq!1OzL3EI', 'Citra Tamba', 'permatamaras@hotmail.com', '+62 (38) 775-7802', 'active'),
-(34, 'admin34', ')6BWd3hqgb', 'Cemeti Anggraini', 'cinta92@cv.mil', '+62-588-993-5628', 'active'),
-(35, 'admin35', '&ORV7mCtA3', 'Anom Gunarto', 'lsinaga@gmail.com', '+62-0507-847-7119', 'active'),
-(36, 'admin36', '4K*U7VdoO)', 'Rendy Sinaga, S.I.Kom', 'teguh51@perum.com', '+62 (516) 715-4718', 'active'),
-(37, 'admin37', '$cuUD@jy5i', 'Gading Tampubolon', 'mardhiyahrafi@perum.sch.id', '(063) 322 7078', 'active'),
-(38, 'admin38', '^QII9Mns)5', 'Legawa Kuswandari', 'puspasaridwi@hotmail.com', '+62-67-513-0157', 'active'),
-(39, 'admin39', '6^$Y8LPcs1', 'Johan Haryanti', 'cawisadi46@cv.desa.id', '080 966 3922', 'active'),
-(40, 'admin40', 'jG&K^4GhIs', 'Rosman Napitupulu, S.Farm', 'ssitorus@hotmail.com', '+62-022-214-2482', 'active'),
-(41, 'admin41', 'elURVCql*4', 'Dr. Dasa Puspasari, M.Ak', 'namagaeka@gmail.com', '0816737591', 'active'),
-(42, 'admin42', 'uGt9Evtvj_', 'Martaka Waskita, M.Farm', 'sakura61@hotmail.com', '(0151) 841 7710', 'active'),
-(43, 'admin43', '&JSZXTsyU4', 'Michelle Pratiwi, S.E.', 'makarautami@perum.web.id', '+62 (0477) 762-8152', 'active'),
-(44, 'admin44', 'Is&3HSbO^5', 'drg. Jati Yuliarti, S.H.', 'darimin78@hotmail.com', '(0563) 933-5584', 'active'),
-(45, 'admin45', 'r&H8E$z^_R', 'Kamila Utami', 'nsiregar@pt.id', '+62 (0495) 872 7221', 'active'),
-(46, 'admin46', '(HzJxqNQ_6', 'Ir. Hamima Rajasa, S.T.', 'maimunahwahyudin@pd.biz.id', '+62-129-698-2122', 'active'),
-(47, 'admin47', 'iFaO6dBl^3', 'Drs. Nilam Widodo, S.E.', 'bajragin18@perum.or.id', '+62 (072) 162-6112', 'active'),
-(48, 'admin48', '@8ZEBqczYI', 'Edison Permadi, S.Farm', 'ifa34@perum.org', '+62 (0478) 433-3473', 'active'),
-(49, 'admin49', '2%4CQDFg91', 'Farhunnisa Putra', 'hesti85@ud.int', '+62 (0553) 308 1235', 'active'),
-(50, 'admin50', '$Z9V##&s%c', 'dr. Rini Hakim', 'zhabibi@gmail.com', '0883809024', 'active'),
-(51, 'admin51', '$xBdY9Vc+h', 'drg. Cagak Usada', 'maheswarasaadat@yahoo.com', '+62 (0945) 688-6225', 'active'),
-(52, 'admin52', ')lhInT#l1D', 'Ganda Mayasari', 'kwaskita@hotmail.com', '+62 (007) 095 2132', 'active'),
-(53, 'admin53', '3+52$GgTng', 'Kiandra Andriani, S.Pd', 'puspasarimaya@hotmail.com', '(0383) 755 6249', 'active'),
-(54, 'admin54', '@7iGFkjmZF', 'Queen Yuliarti', 'ajiminwaskita@pt.edu', '(015) 211-2226', 'active'),
-(55, 'admin55', 'kp3Ga)TyL#', 'H. Ridwan Tampubolon', 'hasanahivan@pd.int', '+62 (13) 042 9098', 'active'),
-(56, 'admin56', '_2j19GRfk8', 'Tgk. Taufik Hidayat, M.Pd', 'puspitakadir@yahoo.com', '+62 (038) 116-7382', 'active'),
-(57, 'admin57', '!O6(Qk9uG7', 'Tantri Natsir', 'yolandaikhsan@hotmail.com', '(084) 697 0212', 'active'),
-(58, 'admin58', '+4Hbz8TIit', 'Baktiadi Megantara', 'msiregar@pt.biz.id', '(086) 707 8916', 'active'),
-(59, 'admin59', '(S52Gb#r!&', 'Anastasia Maryati', 'rajatahairyanto@yahoo.com', '+62-671-244-9956', 'active'),
-(60, 'admin60', 'Q(5PeA#pHc', 'Lili Laksita', 'latif17@perum.mil', '+62 (0253) 773 7273', 'active'),
-(61, 'admin61', 'VoWmro(t)6', 'Gada Budiyanto, M.Kom.', 'lwijaya@pt.sch.id', '+62 (539) 939 8836', 'active'),
-(62, 'admin62', '28MCJGd*$z', 'Kasiran Maryadi', 'fsuryatmi@ud.ac.id', '+62 (026) 892-1870', 'active'),
-(63, 'admin63', 'J#i+R2QxC#', 'Eka Sirait', 'nwidodo@pd.org', '+62-37-570-8105', 'active'),
-(64, 'admin64', 'tG3Dv4t**+', 'Anita Wijaya, S.Farm', 'maimunah17@gmail.com', '082 968 5584', 'active'),
-(65, 'admin65', '@0Em*z1)Kx', 'Jarwa Hassanah', 'galarwastuti@pd.net', '+62 (0726) 308-2548', 'active'),
-(66, 'admin66', 'Gp80HoJa$(', 'Gabriella Tarihoran', 'empluk00@perum.id', '+62 (99) 625 0471', 'active'),
-(67, 'admin67', 'd3^EGp1p+5', 'Gilda Winarno', 'banawi65@ud.desa.id', '0859216423', 'active'),
-(68, 'admin68', '@5Tf$9yzz0', 'Ajimin Aryani', 'pandumaheswara@perum.id', '+62 (0519) 836-2065', 'active'),
-(69, 'admin69', 'O4g%pJx0$$', 'Samiah Wibisono', 'dodo15@gmail.com', '+62 (357) 315 3765', 'active'),
-(70, 'admin70', '9sb(_JQF)^', 'Rahmi Simbolon', 'tasdik63@yahoo.com', '+62-319-961-3243', 'active'),
-(71, 'admin71', '$8+KeX#rmk', 'dr. Edward Hasanah', 'paiman59@cv.mil.id', '+62 (379) 512 9599', 'active'),
-(72, 'admin72', '!*A2dIf9R@', 'R. Nabila Prabowo, S.H.', 'kasiyah93@pt.com', '0812446849', 'active'),
-(73, 'admin73', '(qH21UGdgJ', 'Drajat Simbolon', 'opannamaga@gmail.com', '+62 (15) 153-9702', 'active'),
-(74, 'admin74', '(@9U%Q@f*Z', 'Natalia Manullang', 'yogasuartini@hotmail.com', '(081) 965 3925', 'active'),
-(75, 'admin75', 'SV&1OxXai!', 'H. Mumpuni Sihombing', 'pratamacaraka@cv.my.id', '(0559) 527-3084', 'active'),
-(76, 'admin76', '1%5Qtvie4x', 'Vino Latupono, M.M.', 'anggrainimursinin@pd.mil.id', '0869256081', 'active'),
-(77, 'admin77', '!6zCMQPC_s', 'Cut Shania Mandala', 'najwanashiruddin@yahoo.com', '+62 (65) 449 3981', 'active'),
-(78, 'admin78', 'z*0zFfVb8U', 'Hj. Padmi Kusmawati', 'mrahayu@yahoo.com', '+62 (0311) 363 5914', 'active'),
-(79, 'admin79', 'MV3BW)n7q^', 'Caturangga Prasetyo', 'asmadi52@pt.sch.id', '+62 (002) 724 3070', 'active'),
-(80, 'admin80', ')oa1CEjn_N', 'Sutan Pranata Kusmawati', 'wahyudinjais@pd.id', '+62 (157) 989 9113', 'active'),
-(81, 'admin81', '^6VWTl)Q*V', 'Cut Qori Pertiwi, S.Kom', 'lpratiwi@gmail.com', '080 927 0432', 'active'),
-(82, 'admin82', '9zSOgn0n_3', 'Paulin Pertiwi', 'pkusumo@hotmail.com', '+62 (067) 791 3165', 'active'),
-(83, 'admin83', 'tbz1BcpB%!', 'Elisa Manullang', 'kairav99@pt.ponpes.id', '+62-260-284-3804', 'active'),
-(84, 'admin84', '$cKb7Vlda@', 'Dian Siregar', 'bakiman39@cv.co.id', '+62 (488) 950-6685', 'active'),
-(85, 'admin85', '#SyBUokT^3', 'R. Elisa Lestari', 'uwaissaka@hotmail.com', '(090) 234-2502', 'active'),
-(86, 'admin86', '_iN36FsG6x', 'drg. Paris Aryani', 'hartomayasari@pd.mil', '+62 (30) 628-5517', 'active'),
-(87, 'admin87', 'v91&aEcP5&', 'Sutan Prayoga Waluyo, S.H.', 'najamnainggolan@yahoo.com', '(0008) 603-5912', 'active'),
-(88, 'admin88', 'h#T0kBKtqd', 'Ganep Habibi', 'zmayasari@pt.net.id', '+62 (696) 427-7696', 'active'),
-(89, 'admin89', '_U$M1Ifz%b', 'Sutan Hasan Pudjiastuti, S.Kom', 'gabriellaharyanti@gmail.com', '+62 (702) 472-9253', 'active'),
-(90, 'admin90', 'oYje0VTpS#', 'Dt. Capa Wijaya', 'nurainimahdi@pt.mil.id', '+62-90-008-7105', 'active'),
-(91, 'admin91', 'v)@y0Jirc8', 'Prabu Kurniawan', 'upratama@yahoo.com', '+62 (19) 075-8242', 'active'),
-(92, 'admin92', 'D3d5+Iqn^i', 'Silvia Dabukke', 'pancanuraini@pd.ponpes.id', '+62-0969-149-7037', 'active'),
-(93, 'admin93', '1#2B3mDp_u', 'Olivia Habibi', 'dadap54@perum.or.id', '+62-103-447-4689', 'active'),
-(94, 'admin94', 'ha)W^W7t!6', 'Cakrawala Utama', 'empluk51@ud.com', '+62-067-970-7736', 'active'),
-(95, 'admin95', '6RKVrn5e!C', 'Taufan Firmansyah', 'dlailasari@gmail.com', '(0992) 949-2950', 'active'),
-(96, 'admin96', 'Y^Ex1Moaw1', 'Laila Saefullah, M.Pd', 'dlazuardi@hotmail.com', '+62 (725) 125 2315', 'active'),
-(97, 'admin97', '99aLWEAd#7', 'Opung Kuswandari, S.Sos', 'latuponoibrani@yahoo.com', '081 053 4246', 'active'),
-(98, 'admin98', 'r(@pGMVgx7', 'Kania Gunawan', 'vpalastri@gmail.com', '0847348886', 'active'),
-(99, 'admin99', 'R2NjY%ky!d', 'Teddy Rajasa', 'leo22@ud.sch.id', '(029) 421 7304', 'active'),
-(100, 'admin100', '9GL0oSFN$f', 'Harsaya Yuliarti', 'napitupulukuncara@hotmail.com', '+62-352-793-0480', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `byn`
---
+CREATE DATABASE fp_mbd;
+
+-- CREATE TABLE Statements
+
+CREATE TABLE FACULTY (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    name VARCHAR(60) NOT NULL,
+    code VARCHAR(10) NOT NULL,
+    status VARCHAR(8) NOT NULL
+);
+
+CREATE TABLE FACULTY_DEPARTMENT (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    faculty_id CHAR(12) NOT NULL,
+    department_name VARCHAR(60) NOT NULL,
+    status VARCHAR(8) NOT NULL,
+    FOREIGN KEY (faculty_id) REFERENCES FACULTY(id)
+);
+
+CREATE TABLE STAFF (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    username VARCHAR(20) NOT NULL,
+    password VARCHAR(20) NOT NULL,
+    faculty CHAR(5) NOT NULL,
+    department CHAR(60) NOT NULL,
+    address VARCHAR(100) NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    email VARCHAR(50) NOT NULL,
+    faculty_department_id CHAR(12) NOT NULL,
+    faculty_id CHAR(12) NOT NULL,
+    FOREIGN KEY (faculty_department_id) REFERENCES FACULTY_DEPARTMENT(id),
+    FOREIGN KEY (faculty_id) REFERENCES FACULTY(id)
+);
+
+CREATE TABLE SUSTAINABILITY_COORDINATOR (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    username VARCHAR(20) NOT NULL,
+    password VARCHAR(20) NOT NULL,
+    fullname VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL,
+    phone VARCHAR(20) NOT NULL
+);
+
+CREATE TABLE SUSTAINABILITY_CAMPAIGN (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    title VARCHAR(50) NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    start_date DATETIME NOT NULL,
+    end_date DATETIME NOT NULL,
+    target_waste_reduction DECIMAL(6,2) NOT NULL,
+    bonus_points INT NOT NULL,
+    status CHAR(9) NOT NULL,
+    created_by INT,
+    sustainability_coordinator_id CHAR(12) NOT NULL,
+    FOREIGN KEY (sustainability_coordinator_id) REFERENCES SUSTAINABILITY_COORDINATOR(id)
+);
+
+CREATE TABLE USERR (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    username VARCHAR(20) NOT NULL,
+    password VARCHAR(20) NOT NULL,
+    fullname VARCHAR(100) NOT NULL,
+    email VARCHAR(50),
+    phone VARCHAR(20),
+    registration_date DATETIME NOT NULL,
+    qrcode VARCHAR(100) NOT NULL,
+    total_points INT NOT NULL DEFAULT 0,
+    status CHAR(8) NOT NULL,
+    faculty_id CHAR(12) NOT NULL,
+    dept_id CHAR(12) NOT NULL,
+    FOREIGN KEY (faculty_id) REFERENCES FACULTY(id),
+    FOREIGN KEY (dept_id) REFERENCES FACULTY_DEPARTMENT(id)
+);
+
+CREATE TABLE USER_SUSTAINABILITY_CAMPAIGN (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    status CHAR(9),
+    sustainability_campaign_id CHAR(12) NOT NULL,
+    user_id CHAR(12) NOT NULL,
+    FOREIGN KEY (sustainability_campaign_id) REFERENCES SUSTAINABILITY_CAMPAIGN(id),
+    FOREIGN KEY (user_id) REFERENCES USERR(id)
+);
 
 CREATE TABLE BIN_TYPE (
-    id VARCHAR(12) PRIMARY KEY,
-    bin_name VARCHAR(255),
-    description VARCHAR(255), 
-    color_code VARCHAR(20),
-    status VARCHAR(8)
-); ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `byn`
---
-
-INSERT INTO `byn` (`byn_id`, `user_id`, `campaign_id`, `point_amount`, `timestamp`) VALUES
-(1, 1, 71, 30, '2025-01-30 12:44:48'),
-(2, 53, 84, 70, '2025-05-07 05:14:30'),
-(3, 62, 84, 35, '2025-03-13 01:36:11'),
-(4, 97, 37, 51, '2025-03-15 16:07:54'),
-(5, 37, 83, 17, '2025-03-11 11:42:36'),
-(6, 99, 12, 93, '2025-01-01 18:36:54'),
-(7, 74, 30, 78, '2025-05-28 06:44:31'),
-(8, 95, 93, 14, '2025-01-12 21:14:31'),
-(9, 23, 54, 32, '2025-05-29 09:49:15'),
-(10, 5, 51, 73, '2025-05-25 16:18:39'),
-(11, 24, 96, 47, '2025-03-29 09:47:50'),
-(12, 5, 2, 48, '2025-05-14 17:10:56'),
-(13, 73, 78, 23, '2025-03-24 10:43:20'),
-(14, 43, 37, 68, '2025-05-13 18:43:30'),
-(15, 83, 70, 77, '2025-03-05 11:42:00'),
-(16, 64, 18, 74, '2025-01-16 11:03:05'),
-(17, 60, 35, 34, '2025-02-28 05:02:56'),
-(18, 15, 43, 30, '2025-02-13 09:28:09'),
-(19, 94, 59, 92, '2025-04-27 20:20:03'),
-(20, 33, 92, 33, '2025-01-01 22:21:31'),
-(21, 2, 95, 53, '2025-03-14 02:06:30'),
-(22, 38, 73, 96, '2025-02-15 04:23:03'),
-(23, 97, 25, 32, '2025-03-18 19:55:36'),
-(24, 79, 82, 61, '2025-03-19 12:28:35'),
-(25, 55, 66, 51, '2025-01-14 21:28:07'),
-(26, 12, 52, 95, '2025-01-03 03:26:42'),
-(27, 13, 24, 27, '2025-04-12 21:28:33'),
-(28, 62, 42, 41, '2025-04-01 01:50:08'),
-(29, 1, 34, 59, '2025-03-26 08:57:47'),
-(30, 31, 58, 44, '2025-03-20 10:50:33'),
-(31, 43, 39, 84, '2025-04-19 16:53:36'),
-(32, 93, 74, 11, '2025-01-20 16:05:22'),
-(33, 34, 84, 56, '2025-03-10 23:38:03'),
-(34, 89, 31, 17, '2025-06-09 07:19:10'),
-(35, 86, 16, 69, '2025-03-31 09:24:25'),
-(36, 40, 21, 61, '2025-03-18 13:25:02'),
-(37, 88, 65, 100, '2025-04-27 19:00:16'),
-(38, 99, 40, 98, '2025-05-27 13:15:48'),
-(39, 16, 82, 47, '2025-05-13 06:23:27'),
-(40, 48, 79, 38, '2025-02-08 01:18:50'),
-(41, 29, 18, 71, '2025-02-22 16:43:45'),
-(42, 20, 59, 87, '2025-05-21 00:13:48'),
-(43, 48, 54, 99, '2025-06-04 08:44:28'),
-(44, 71, 61, 78, '2025-03-01 23:24:30'),
-(45, 86, 28, 41, '2025-01-29 11:08:57'),
-(46, 88, 97, 86, '2025-05-02 09:42:08'),
-(47, 11, 68, 67, '2025-01-17 13:25:36'),
-(48, 68, 91, 56, '2025-01-16 05:35:45'),
-(49, 10, 73, 24, '2025-05-06 02:15:18'),
-(50, 8, 71, 74, '2025-06-01 06:29:14'),
-(51, 26, 74, 78, '2025-04-12 16:19:48'),
-(52, 20, 22, 51, '2025-01-22 22:09:47'),
-(53, 67, 57, 24, '2025-04-05 12:08:04'),
-(54, 88, 27, 84, '2025-05-11 13:22:18'),
-(55, 63, 12, 75, '2025-01-16 21:29:23'),
-(56, 58, 8, 68, '2025-02-14 03:00:47'),
-(57, 17, 66, 63, '2025-02-28 21:38:03'),
-(58, 59, 73, 17, '2025-05-05 17:39:52'),
-(59, 72, 60, 96, '2025-05-23 12:20:32'),
-(60, 40, 93, 12, '2025-03-22 18:00:12'),
-(61, 51, 33, 10, '2025-04-12 08:33:53'),
-(62, 96, 28, 84, '2025-01-26 23:09:16'),
-(63, 10, 6, 64, '2025-02-22 12:53:33'),
-(64, 45, 90, 18, '2025-01-01 05:33:11'),
-(65, 70, 8, 18, '2025-02-18 01:26:10'),
-(66, 61, 5, 46, '2025-05-12 01:38:29'),
-(67, 53, 24, 27, '2025-05-30 14:30:37'),
-(68, 99, 83, 92, '2025-01-09 08:46:56'),
-(69, 54, 48, 58, '2025-05-24 20:59:57'),
-(70, 58, 49, 58, '2025-04-10 06:53:23'),
-(71, 11, 88, 94, '2025-04-13 07:06:14'),
-(72, 70, 18, 93, '2025-05-27 23:10:15'),
-(73, 45, 16, 32, '2025-04-18 08:35:13'),
-(74, 69, 51, 77, '2025-05-12 06:34:02'),
-(75, 17, 94, 38, '2025-04-06 11:30:02'),
-(76, 1, 97, 12, '2025-02-23 23:03:01'),
-(77, 39, 60, 96, '2025-02-28 05:13:02'),
-(78, 93, 70, 64, '2025-02-26 02:17:02'),
-(79, 69, 49, 39, '2025-01-26 07:53:32'),
-(80, 32, 59, 54, '2025-03-24 16:56:45'),
-(81, 20, 36, 34, '2025-01-12 11:06:41'),
-(82, 93, 98, 24, '2025-02-15 06:25:31'),
-(83, 5, 85, 63, '2025-01-01 15:53:46'),
-(84, 79, 99, 12, '2025-01-22 04:27:39'),
-(85, 31, 27, 18, '2025-05-30 01:51:56'),
-(86, 13, 77, 14, '2025-03-08 12:42:55'),
-(87, 58, 77, 96, '2025-05-23 13:21:30'),
-(88, 91, 7, 41, '2025-04-06 15:55:57'),
-(89, 95, 6, 61, '2025-05-17 08:15:18'),
-(90, 57, 30, 79, '2025-03-13 01:36:37'),
-(91, 28, 97, 17, '2025-03-17 15:38:08'),
-(92, 18, 65, 47, '2025-03-18 01:54:58'),
-(93, 30, 94, 83, '2025-01-19 03:35:55'),
-(94, 41, 74, 86, '2025-04-11 16:16:31'),
-(95, 99, 87, 51, '2025-05-14 10:01:11'),
-(96, 31, 39, 28, '2025-06-03 05:05:29'),
-(97, 85, 67, 38, '2025-05-12 14:48:30'),
-(98, 53, 39, 45, '2025-01-29 04:22:03'),
-(99, 8, 72, 85, '2025-04-04 00:21:55'),
-(100, 95, 23, 90, '2025-05-05 10:55:50');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `byn_location`
---
-
-CREATE TABLE `byn_location` (
-  `location_id` int(11) NOT NULL,
-  `faculty_id` int(11) DEFAULT NULL,
-  `dept_id` int(11) DEFAULT NULL,
-  `room` varchar(50) DEFAULT NULL,
-  `building` varchar(100) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `byn_location`
---
-
-INSERT INTO `byn_location` (`location_id`, `faculty_id`, `dept_id`, `room`, `building`, `status`) VALUES
-(1, 4, 3, 'R-229', 'UD Suwarno', 'active'),
-(2, 5, 38, 'R-439', 'Perum Pratiwi Halimah', 'active'),
-(3, 7, 7, 'R-995', 'PT Hasanah Suryono', 'active'),
-(4, 7, 29, 'R-202', 'PD Zulkarnain Tbk', 'active'),
-(5, 5, 30, 'R-115', 'PD Wijayanti', 'active'),
-(6, 6, 10, 'R-519', 'CV Kusumo Halimah (Persero) Tbk', 'active'),
-(7, 7, 10, 'R-176', 'PD Yuliarti Tbk', 'active'),
-(8, 4, 17, 'R-446', 'Perum Iswahyudi Uwais', 'active'),
-(9, 5, 26, 'R-765', 'PD Pudjiastuti Prasetyo Tbk', 'active'),
-(10, 1, 22, 'R-972', 'PT Permata', 'active'),
-(11, 6, 35, 'R-489', 'PD Widiastuti', 'active'),
-(12, 3, 32, 'R-993', 'PD Rahayu (Persero) Tbk', 'active'),
-(13, 5, 3, 'R-732', 'UD Gunarto', 'active'),
-(14, 1, 16, 'R-746', 'Perum Waluyo Siregar (Persero) Tbk', 'active'),
-(15, 6, 19, 'R-332', 'CV Wastuti', 'active'),
-(16, 6, 6, 'R-544', 'Perum Budiman Tbk', 'active'),
-(17, 1, 7, 'R-554', 'PT Dongoran Firgantoro', 'active'),
-(18, 2, 20, 'R-129', 'UD Rahimah Puspita (Persero) Tbk', 'active'),
-(19, 1, 21, 'R-915', 'PT Hutasoit Marpaung Tbk', 'active'),
-(20, 1, 19, 'R-467', 'PT Pranowo Suwarno Tbk', 'active'),
-(21, 3, 28, 'R-249', 'CV Nainggolan (Persero) Tbk', 'active'),
-(22, 2, 34, 'R-521', 'Perum Lestari Saefullah (Persero) Tbk', 'active'),
-(23, 5, 12, 'R-274', 'Perum Siregar', 'active'),
-(24, 2, 6, 'R-724', 'PT Budiman (Persero) Tbk', 'active'),
-(25, 7, 25, 'R-734', 'UD Permadi (Persero) Tbk', 'active'),
-(26, 6, 16, 'R-609', 'Perum Mardhiyah Anggraini', 'active'),
-(27, 5, 10, 'R-337', 'CV Mandasari Pratiwi Tbk', 'active'),
-(28, 4, 17, 'R-570', 'PD Usada', 'active'),
-(29, 3, 1, 'R-923', 'PT Palastri Haryanti', 'active'),
-(30, 4, 19, 'R-793', 'PT Zulkarnain Marbun', 'active'),
-(31, 5, 11, 'R-175', 'PT Marbun Hardiansyah (Persero) Tbk', 'active'),
-(32, 4, 23, 'R-701', 'PD Sitorus Tbk', 'active'),
-(33, 3, 28, 'R-806', 'CV Napitupulu Kuswandari', 'active'),
-(34, 3, 30, 'R-965', 'CV Widodo Nugroho Tbk', 'active'),
-(35, 3, 13, 'R-493', 'PD Suartini', 'active'),
-(36, 7, 31, 'R-209', 'PT Nugroho Pratiwi (Persero) Tbk', 'active'),
-(37, 2, 25, 'R-685', 'UD Permadi', 'active'),
-(38, 3, 37, 'R-402', 'CV Rajasa Anggraini Tbk', 'active'),
-(39, 6, 19, 'R-122', 'UD Mandasari (Persero) Tbk', 'active'),
-(40, 7, 26, 'R-381', 'Perum Pratama Tbk', 'active'),
-(41, 1, 37, 'R-985', 'CV Widodo Susanti (Persero) Tbk', 'active'),
-(42, 6, 4, 'R-720', 'PD Sitorus', 'active'),
-(43, 6, 32, 'R-952', 'UD Wijayanti Tbk', 'active'),
-(44, 3, 15, 'R-721', 'CV Jailani Hariyah Tbk', 'active'),
-(45, 7, 23, 'R-324', 'PT Prakasa', 'active'),
-(46, 6, 13, 'R-735', 'UD Sinaga Latupono', 'active'),
-(47, 3, 9, 'R-743', 'PT Rahmawati (Persero) Tbk', 'active'),
-(48, 1, 3, 'R-416', 'UD Hastuti Zulkarnain', 'active'),
-(49, 7, 29, 'R-134', 'PD Susanti Tarihoran Tbk', 'active'),
-(50, 5, 24, 'R-849', 'PT Thamrin Widiastuti', 'active'),
-(51, 2, 6, 'R-402', 'PT Wacana Budiman Tbk', 'active'),
-(52, 3, 27, 'R-279', 'PD Lazuardi Tbk', 'active'),
-(53, 2, 9, 'R-905', 'PT Firmansyah', 'active'),
-(54, 5, 24, 'R-643', 'Perum Wulandari', 'active'),
-(55, 5, 18, 'R-950', 'PD Hastuti Tbk', 'active'),
-(56, 2, 17, 'R-944', 'PD Mustofa Nuraini Tbk', 'active'),
-(57, 4, 19, 'R-864', 'PT Budiyanto Tbk', 'active'),
-(58, 7, 22, 'R-923', 'PD Mandala Najmudin Tbk', 'active'),
-(59, 1, 30, 'R-177', 'Perum Agustina Santoso (Persero) Tbk', 'active'),
-(60, 2, 15, 'R-980', 'PT Dongoran', 'active'),
-(61, 6, 26, 'R-966', 'CV Firgantoro Siregar', 'active'),
-(62, 7, 36, 'R-474', 'PD Adriansyah Tbk', 'active'),
-(63, 1, 26, 'R-114', 'PD Santoso Hutapea Tbk', 'active'),
-(64, 3, 35, 'R-226', 'PT Widodo Laksmiwati', 'active'),
-(65, 4, 24, 'R-788', 'PD Habibi Pratiwi', 'active'),
-(66, 6, 17, 'R-698', 'UD Nurdiyanti Tbk', 'active'),
-(67, 4, 24, 'R-210', 'UD Suryatmi Laksmiwati Tbk', 'active'),
-(68, 6, 15, 'R-582', 'UD Riyanti (Persero) Tbk', 'active'),
-(69, 1, 40, 'R-674', 'Perum Sihotang Prayoga (Persero) Tbk', 'active'),
-(70, 3, 40, 'R-326', 'CV Sihombing Mulyani Tbk', 'active'),
-(71, 6, 5, 'R-750', 'CV Ardianto Pradipta', 'active'),
-(72, 7, 30, 'R-817', 'Perum Anggraini', 'active'),
-(73, 3, 27, 'R-219', 'PD Kuswandari Uwais', 'active'),
-(74, 2, 3, 'R-138', 'PT Hasanah', 'active'),
-(75, 3, 32, 'R-218', 'PT Sitorus Siregar', 'active'),
-(76, 1, 16, 'R-650', 'CV Pradana', 'active'),
-(77, 2, 25, 'R-564', 'CV Prasetyo Sihombing', 'active'),
-(78, 3, 35, 'R-529', 'CV Waskita Wahyudin (Persero) Tbk', 'active'),
-(79, 5, 10, 'R-524', 'Perum Habibi Wasita (Persero) Tbk', 'active'),
-(80, 6, 7, 'R-953', 'PT Saefullah', 'active'),
-(81, 4, 40, 'R-517', 'Perum Hastuti Firgantoro', 'active'),
-(82, 3, 3, 'R-806', 'PT Budiman Laksmiwati Tbk', 'active'),
-(83, 3, 14, 'R-554', 'CV Hidayat', 'active'),
-(84, 4, 16, 'R-975', 'PT Marpaung Damanik', 'active'),
-(85, 3, 7, 'R-802', 'Perum Winarno Sinaga', 'active'),
-(86, 3, 35, 'R-760', 'PT Handayani', 'active'),
-(87, 3, 4, 'R-507', 'PD Wijayanti Hariyah Tbk', 'active'),
-(88, 3, 13, 'R-225', 'PT Purnawati', 'active'),
-(89, 7, 30, 'R-193', 'PT Megantara Damanik (Persero) Tbk', 'active'),
-(90, 6, 14, 'R-757', 'PD Hassanah', 'active'),
-(91, 6, 39, 'R-121', 'PT Utama Pangestu Tbk', 'active'),
-(92, 1, 22, 'R-349', 'PD Pudjiastuti Mayasari Tbk', 'active'),
-(93, 2, 37, 'R-310', 'CV Santoso', 'active'),
-(94, 1, 36, 'R-312', 'UD Hasanah', 'active'),
-(95, 5, 14, 'R-932', 'PD Usada', 'active'),
-(96, 7, 15, 'R-436', 'PT Suryatmi', 'active'),
-(97, 7, 10, 'R-907', 'PD Latupono Agustina', 'active'),
-(98, 5, 1, 'R-383', 'Perum Firgantoro Rahmawati (Persero) Tbk', 'active'),
-(99, 7, 10, 'R-233', 'CV Padmasari Mustofa', 'active'),
-(100, 5, 17, 'R-917', 'PD Andriani Tbk', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `faculty`
---
-
-CREATE TABLE `faculty` (
-  `faculty_id` int(11) NOT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `faculty`
---
-
-INSERT INTO `faculty` (`faculty_id`, `name`, `status`) VALUES
-(1, 'FSAD', 'active'),
-(2, 'FTEIC', 'active'),
-(3, 'FTSPK', 'active'),
-(4, 'FTIRS', 'active'),
-(5, 'FTK', 'active'),
-(6, 'FV', 'active'),
-(7, 'FDKBD', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `faculty_department`
---
-
-CREATE TABLE `faculty_department` (
-  `dept_id` int(11) NOT NULL,
-  `faculty_id` int(11) DEFAULT NULL,
-  `department_name` varchar(100) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `faculty_department`
---
-
-INSERT INTO `faculty_department` (`dept_id`, `faculty_id`, `department_name`, `status`) VALUES
-(1, 1, 'Fisika', 'active'),
-(2, 1, 'Matematika', 'active'),
-(3, 1, 'Statistika', 'active'),
-(4, 1, 'Kimia', 'active'),
-(5, 1, 'Biologi', 'active'),
-(6, 1, 'Aktuaria', 'active'),
-(7, 2, 'Teknik Elektro', 'active'),
-(8, 2, 'Teknik Biomedik', 'active'),
-(9, 2, 'Teknik Komputer', 'active'),
-(10, 2, 'Teknik Informatika', 'active'),
-(11, 2, 'Sistem Informasi', 'active'),
-(12, 2, 'Teknologi Informasi', 'active'),
-(13, 3, 'Teknik Sipil', 'active'),
-(14, 3, 'Arsitektur', 'active'),
-(15, 3, 'Teknik Lingkungan', 'active'),
-(16, 3, 'Perencanaan Wilayah dan Kota', 'active'),
-(17, 3, 'Teknik Geomatika', 'active'),
-(18, 3, 'Teknik Geofisika', 'active'),
-(19, 4, 'Teknik Mesin', 'active'),
-(20, 4, 'Teknik Kimia', 'active'),
-(21, 4, 'Teknik Fisika', 'active'),
-(22, 4, 'Teknik Sistem dan Industri', 'active'),
-(23, 4, 'Teknik Material dan Metalurgi', 'active'),
-(24, 5, 'Teknik Perkapalan', 'active'),
-(25, 5, 'Teknik Sistem Perkapalan', 'active'),
-(26, 5, 'Teknik Kelautan', 'active'),
-(27, 5, 'Teknik Transportasi Laut', 'active'),
-(28, 5, 'Teknik Lepas Pantai', 'active'),
-(29, 6, 'Teknik Infrastruktur Sipil', 'active'),
-(30, 6, 'Teknik Mesin Industri', 'active'),
-(31, 6, 'Teknik Elektro Otomasi', 'active'),
-(32, 6, 'Teknik Kimia Industri', 'active'),
-(33, 6, 'Teknik Instrumentasi', 'active'),
-(34, 6, 'Statistika Bisnis', 'active'),
-(35, 7, 'Desain Produk Industri', 'active'),
-(36, 7, 'Desain Interior', 'active'),
-(37, 7, 'Desain Komunikasi Visual', 'active'),
-(38, 7, 'Manajemen Teknologi', 'active'),
-(39, 7, 'Manajemen Bisnis', 'active'),
-(40, 7, 'Studi Pembangunan', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `marketing`
---
-
-CREATE TABLE `marketing` (
-  `marketing_id` int(11) NOT NULL,
-  `campaign_id` int(11) DEFAULT NULL,
-  `platform` varchar(50) DEFAULT NULL,
-  `start_date` date DEFAULT NULL,
-  `end_date` date DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `marketing`
---
-
-INSERT INTO `marketing` (`marketing_id`, `campaign_id`, `platform`, `start_date`, `end_date`, `status`) VALUES
-(1, 1, 'Instagram', '2024-09-16', '2025-05-10', 'active'),
-(2, 2, 'Twitter', '2025-04-15', '2025-04-16', 'active'),
-(3, 3, 'Twitter', '2025-04-20', '2025-06-08', 'active'),
-(4, 4, 'LinkedIn', '2025-04-06', '2025-05-30', 'active'),
-(5, 5, 'LinkedIn', '2024-09-21', '2024-12-12', 'active'),
-(6, 6, 'Twitter', '2025-05-05', '2025-05-28', 'active'),
-(7, 7, 'LinkedIn', '2025-03-25', '2025-05-17', 'active'),
-(8, 8, 'Twitter', '2024-11-17', '2025-04-24', 'active'),
-(9, 9, 'Twitter', '2025-05-16', '2025-05-29', 'active'),
-(10, 10, 'LinkedIn', '2025-06-06', '2025-06-08', 'active'),
-(11, 11, 'Instagram', '2025-02-20', '2025-06-08', 'active'),
-(12, 12, 'Instagram', '2024-08-04', '2025-05-26', 'active'),
-(13, 13, 'Twitter', '2025-01-28', '2025-03-19', 'active'),
-(14, 14, 'LinkedIn', '2024-10-17', '2025-05-12', 'active'),
-(15, 15, 'Instagram', '2025-03-19', '2025-04-11', 'active'),
-(16, 16, 'Twitter', '2024-08-13', '2025-01-08', 'active'),
-(17, 17, 'Twitter', '2025-03-24', '2025-04-01', 'active'),
-(18, 18, 'LinkedIn', '2025-03-06', '2025-03-08', 'active'),
-(19, 19, 'LinkedIn', '2024-10-16', '2025-04-27', 'active'),
-(20, 20, 'Twitter', '2024-07-04', '2025-05-30', 'active'),
-(21, 21, 'Instagram', '2024-12-04', '2025-04-04', 'active'),
-(22, 22, 'LinkedIn', '2025-03-19', '2025-04-22', 'active'),
-(23, 23, 'LinkedIn', '2024-11-27', '2025-03-05', 'active'),
-(24, 24, 'LinkedIn', '2025-02-04', '2025-03-02', 'active'),
-(25, 25, 'Instagram', '2025-06-01', '2025-06-07', 'active'),
-(26, 26, 'Instagram', '2024-10-31', '2025-04-04', 'active'),
-(27, 27, 'Twitter', '2024-06-10', '2024-12-06', 'active'),
-(28, 28, 'LinkedIn', '2024-10-23', '2025-05-15', 'active'),
-(29, 29, 'Instagram', '2024-08-26', '2025-04-20', 'active'),
-(30, 30, 'Instagram', '2025-02-01', '2025-03-26', 'active'),
-(31, 31, 'LinkedIn', '2024-08-13', '2024-12-25', 'active'),
-(32, 32, 'Instagram', '2025-04-02', '2025-05-09', 'active'),
-(33, 33, 'Twitter', '2025-02-14', '2025-03-02', 'active'),
-(34, 34, 'Instagram', '2025-04-24', '2025-05-31', 'active'),
-(35, 35, 'Instagram', '2024-07-27', '2024-10-26', 'active'),
-(36, 36, 'Twitter', '2024-10-23', '2024-11-13', 'active'),
-(37, 37, 'LinkedIn', '2024-07-24', '2025-02-15', 'active'),
-(38, 38, 'Instagram', '2024-06-27', '2025-02-14', 'active'),
-(39, 39, 'Twitter', '2025-01-29', '2025-05-05', 'active'),
-(40, 40, 'LinkedIn', '2025-06-01', '2025-06-05', 'active'),
-(41, 41, 'Twitter', '2024-08-29', '2025-04-09', 'active'),
-(42, 42, 'Instagram', '2024-12-28', '2025-05-08', 'active'),
-(43, 43, 'Twitter', '2025-06-03', '2025-06-06', 'active'),
-(44, 44, 'Instagram', '2025-03-06', '2025-03-17', 'active'),
-(45, 45, 'LinkedIn', '2024-11-12', '2025-04-05', 'active'),
-(46, 46, 'LinkedIn', '2025-02-28', '2025-03-02', 'active'),
-(47, 47, 'Twitter', '2024-12-18', '2025-05-14', 'active'),
-(48, 48, 'Instagram', '2024-10-24', '2025-02-19', 'active'),
-(49, 49, 'LinkedIn', '2024-12-01', '2025-05-16', 'active'),
-(50, 50, 'Twitter', '2024-08-16', '2024-08-27', 'active'),
-(51, 51, 'LinkedIn', '2025-03-21', '2025-05-18', 'active'),
-(52, 52, 'LinkedIn', '2024-10-20', '2024-11-09', 'active'),
-(53, 53, 'Instagram', '2025-03-31', '2025-04-01', 'active'),
-(54, 54, 'LinkedIn', '2024-07-30', '2024-10-02', 'active'),
-(55, 55, 'LinkedIn', '2024-12-08', '2025-01-20', 'active'),
-(56, 56, 'Instagram', '2024-10-25', '2025-04-26', 'active'),
-(57, 57, 'LinkedIn', '2024-12-23', '2025-03-04', 'active'),
-(58, 58, 'LinkedIn', '2024-07-29', '2024-08-05', 'active'),
-(59, 59, 'Instagram', '2024-12-07', '2025-03-16', 'active'),
-(60, 60, 'Instagram', '2025-01-11', '2025-02-04', 'active'),
-(61, 61, 'LinkedIn', '2024-08-13', '2024-08-30', 'active'),
-(62, 62, 'LinkedIn', '2024-07-07', '2024-10-11', 'active'),
-(63, 63, 'LinkedIn', '2025-02-23', '2025-04-08', 'active'),
-(64, 64, 'LinkedIn', '2025-03-15', '2025-03-16', 'active'),
-(65, 65, 'Twitter', '2024-06-19', '2025-05-05', 'active'),
-(66, 66, 'LinkedIn', '2024-08-07', '2025-02-10', 'active'),
-(67, 67, 'Instagram', '2024-10-05', '2024-11-21', 'active'),
-(68, 68, 'Instagram', '2025-05-31', '2025-06-02', 'active'),
-(69, 69, 'Instagram', '2024-11-13', '2025-03-28', 'active'),
-(70, 70, 'Instagram', '2024-12-27', '2025-04-30', 'active'),
-(71, 71, 'LinkedIn', '2024-11-09', '2025-01-13', 'active'),
-(72, 72, 'LinkedIn', '2025-05-30', '2025-06-07', 'active'),
-(73, 73, 'Twitter', '2024-07-31', '2024-12-28', 'active'),
-(74, 74, 'LinkedIn', '2025-02-15', '2025-05-14', 'active'),
-(75, 75, 'Instagram', '2025-06-02', '2025-06-04', 'active'),
-(76, 76, 'LinkedIn', '2024-09-23', '2025-01-22', 'active'),
-(77, 77, 'Twitter', '2024-10-11', '2024-10-20', 'active'),
-(78, 78, 'LinkedIn', '2024-06-18', '2024-10-29', 'active'),
-(79, 79, 'LinkedIn', '2025-03-22', '2025-05-31', 'active'),
-(80, 80, 'Instagram', '2024-09-21', '2024-09-22', 'active'),
-(81, 81, 'Twitter', '2024-09-08', '2024-10-22', 'active'),
-(82, 82, 'LinkedIn', '2024-10-03', '2025-03-05', 'active'),
-(83, 83, 'LinkedIn', '2025-05-10', '2025-05-25', 'active'),
-(84, 84, 'Twitter', '2024-10-08', '2025-01-20', 'active'),
-(85, 85, 'LinkedIn', '2024-10-06', '2025-06-04', 'active'),
-(86, 86, 'Twitter', '2025-02-01', '2025-04-16', 'active'),
-(87, 87, 'Twitter', '2025-05-17', '2025-06-06', 'active'),
-(88, 88, 'Instagram', '2025-02-10', '2025-02-10', 'active'),
-(89, 89, 'LinkedIn', '2024-08-31', '2024-12-07', 'active'),
-(90, 90, 'Twitter', '2024-09-09', '2025-05-27', 'active'),
-(91, 91, 'Twitter', '2024-06-19', '2025-01-31', 'active'),
-(92, 92, 'Twitter', '2025-04-28', '2025-05-24', 'active'),
-(93, 93, 'Instagram', '2025-02-09', '2025-04-15', 'active'),
-(94, 94, 'LinkedIn', '2024-09-10', '2024-10-03', 'active'),
-(95, 95, 'Instagram', '2024-06-15', '2024-08-15', 'active'),
-(96, 96, 'Instagram', '2024-10-23', '2024-10-28', 'active'),
-(97, 97, 'Twitter', '2024-12-19', '2025-05-04', 'active'),
-(98, 98, 'Twitter', '2024-09-08', '2025-05-05', 'active'),
-(99, 99, 'Twitter', '2024-10-07', '2025-02-22', 'active'),
-(100, 100, 'Twitter', '2024-07-15', '2025-01-02', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `pics`
---
-
-CREATE TABLE `pics` (
-  `pic_id` int(11) NOT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `phone` varchar(20) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `staff_id` int(11) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `pics`
---
-
-INSERT INTO `pics` (`pic_id`, `name`, `phone`, `email`, `staff_id`, `status`) VALUES
-(1, 'Puti Kiandra Situmorang, S.E.', '088 211 6407', 'lwibisono@ud.go.id', 1, 'active'),
-(2, 'R. Ratna Puspita, S.Sos', '+62-022-140-7116', 'lasmononatsir@pt.net', 2, 'active'),
-(3, 'Drs. Anom Sudiati, S.Pt', '(0272) 134-4220', 'jwijaya@ud.my.id', 3, 'active'),
-(4, 'Nurul Wacana', '+62-0541-508-7902', 'dfirgantoro@gmail.com', 4, 'active'),
-(5, 'Rahayu Uyainah', '+62 (0748) 369 4826', 'sihombingwawan@hotmail.com', 5, 'active'),
-(6, 'drg. Adika Mansur', '+62 (099) 791-3580', 'erik56@hotmail.com', 6, 'active'),
-(7, 'Tgk. Zahra Wacana', '+62 (0425) 049-5469', 'permataozy@gmail.com', 7, 'active'),
-(8, 'Jasmin Ramadan, S.I.Kom', '+62 (659) 634 1719', 'fnasyiah@hotmail.com', 8, 'active'),
-(9, 'Dr. Nova Zulaika, S.Pd', '(002) 718-1035', 'gangsa96@gmail.com', 9, 'active'),
-(10, 'dr. Malik Utami, S.Farm', '+62 (25) 696 4677', 'prabamaheswara@perum.web.id', 10, 'active'),
-(11, 'Dr. Bakiman Ramadan, M.Ak', '(0040) 424-9109', 'yulianapradipta@ud.go.id', 11, 'active'),
-(12, 'Vanesa Prakasa', '+62 (037) 279 9987', 'ruwais@perum.org', 12, 'active'),
-(13, 'Malik Rahmawati', '0828980149', 'rahmanagustina@ud.id', 13, 'active'),
-(14, 'Wani Santoso', '+62-0165-596-3831', 'aryaninaradi@cv.desa.id', 14, 'active'),
-(15, 'Artawan Januar', '0876847586', 'karsamulyani@perum.or.id', 15, 'active'),
-(16, 'Limar Megantara', '(0541) 223-1983', 'aastuti@hotmail.com', 16, 'active'),
-(17, 'Cut Faizah Marbun', '+62 (55) 795-5747', 'pjanuar@cv.or.id', 17, 'active'),
-(18, 'Lega Marbun, M.M.', '+62 (035) 939 6169', 'nhasanah@pd.mil.id', 18, 'active'),
-(19, 'Ella Hidayat', '+62 (019) 350 7668', 'vmandala@cv.co.id', 19, 'active'),
-(20, 'Dr. Purwadi Salahudin', '0850578036', 'bancarnapitupulu@cv.net.id', 20, 'active'),
-(21, 'Titin Prasetyo, S.Psi', '(040) 144 7524', 'garan88@yahoo.com', 21, 'active'),
-(22, 'Ilsa Susanti', '0808697470', 'umarbun@cv.biz.id', 22, 'active'),
-(23, 'Humaira Utama', '(0924) 737-4812', 'zulkarnaingalur@gmail.com', 23, 'active'),
-(24, 'Dr. Rangga Widiastuti, S.Farm', '089 322 5015', 'dlatupono@cv.sch.id', 24, 'active'),
-(25, 'Dinda Mayasari', '(0424) 492 0184', 'nyomanhidayat@gmail.com', 25, 'active'),
-(26, 'Warji Tamba', '(052) 332 2861', 'vanyasimbolon@cv.my.id', 26, 'active'),
-(27, 'Cinta Prakasa', '(010) 527 7548', 'ajeng28@ud.or.id', 27, 'active'),
-(28, 'Bahuraksa Hutasoit, M.Farm', '(0270) 836 8998', 'pranatanasyidah@gmail.com', 28, 'active'),
-(29, 'Jayadi Suryatmi', '+62 (006) 418 0710', 'wasitaviman@ud.my.id', 29, 'active'),
-(30, 'T. Laswi Haryanto', '+62-0380-936-5952', 'gabriella88@pt.net.id', 30, 'active'),
-(31, 'Intan Ardianto', '+62-0730-666-8948', 'wzulkarnain@yahoo.com', 31, 'active'),
-(32, 'drg. Almira Simbolon', '+62 (314) 313-5330', 'gandiagustina@gmail.com', 32, 'active'),
-(33, 'Wardaya Safitri', '+62-110-433-4894', 'ayunajmudin@hotmail.com', 33, 'active'),
-(34, 'drg. Ciaobella Yuliarti, M.M.', '+62 (90) 122 9095', 'usamahganjaran@yahoo.com', 34, 'active'),
-(35, 'Ir. Puput Nainggolan', '+62 (31) 286-4791', 'puspautama@pd.mil', 35, 'active'),
-(36, 'Nabila Rajata', '(0259) 881 8077', 'mayasaripangeran@gmail.com', 36, 'active'),
-(37, 'Lanang Iswahyudi', '0820577650', 'eadriansyah@yahoo.com', 37, 'active'),
-(38, 'Dwi Maulana', '+62 (001) 436 1260', 'marbunbancar@cv.int', 38, 'active'),
-(39, 'Mulyono Suryono', '+62 (0180) 437-6009', 'sfujiati@hotmail.com', 39, 'active'),
-(40, 'R. Hartaka Wastuti', '+62-735-516-1729', 'wmansur@pd.int', 40, 'active'),
-(41, 'dr. Ganjaran Mahendra', '(0248) 605 4248', 'kusumoheru@gmail.com', 41, 'active'),
-(42, 'Jaka Widiastuti', '(0103) 419-0384', 'prakasacinthia@cv.mil.id', 42, 'active'),
-(43, 'Harjo Firmansyah', '+62 (0648) 996-6498', 'kriyanti@pt.net.id', 43, 'active'),
-(44, 'Zulaikha Mangunsong', '+62 (25) 005-6953', 'calistasimanjuntak@ud.id', 44, 'active'),
-(45, 'Baktiadi Kuswoyo', '(079) 347-6464', 'suryonokariman@hotmail.com', 45, 'active'),
-(46, 'Muni Wijayanti, S.Farm', '089 128 0057', 'bmangunsong@pd.sch.id', 46, 'active'),
-(47, 'Emong Hutasoit', '+62-675-528-8437', 'nugrohomartana@yahoo.com', 47, 'active'),
-(48, 'Ir. Rahmi Wahyudin', '+62 (0384) 788 0416', 'znarpati@hotmail.com', 48, 'active'),
-(49, 'Dacin Hutagalung', '(0755) 951 9571', 'asmankuswandari@yahoo.com', 49, 'active'),
-(50, 'Bakda Marpaung', '0898652078', 'permadijail@pt.net', 50, 'active'),
-(51, 'KH. Reza Mahendra, S.Ked', '+62 (04) 183 4471', 'hidayantocinta@hotmail.com', 51, 'active'),
-(52, 'Maida Damanik', '+62 (0687) 486 7755', 'dalionoaryani@yahoo.com', 52, 'active'),
-(53, 'drg. Hartana Setiawan, S.Ked', '+62-0089-998-7514', 'fujiatikani@hotmail.com', 53, 'active'),
-(54, 'R. Harsaya Wahyuni', '(0782) 169-9619', 'winarnolatif@gmail.com', 54, 'active'),
-(55, 'Kartika Salahudin', '+62-769-726-0654', 'emaspudjiastuti@gmail.com', 55, 'active'),
-(56, 'Carla Habibi', '+62-211-056-8788', 'usaragih@cv.int', 56, 'active'),
-(57, 'Jane Yulianti, S.Farm', '(099) 432 8303', 'anggriawancaturangga@hotmail.com', 57, 'active'),
-(58, 'Drs. Jane Sihombing, S.Pt', '085 896 9504', 'lulutprastuti@gmail.com', 58, 'active'),
-(59, 'Drs. Gambira Lazuardi', '(0961) 752 2325', 'gsihombing@cv.ac.id', 59, 'active'),
-(60, 'Pangeran Uyainah', '+62 (60) 508 2723', 'mfirmansyah@cv.my.id', 60, 'active'),
-(61, 'Cemeti Tarihoran', '+62-519-726-6485', 'lurhurdongoran@pt.edu', 61, 'active'),
-(62, 'Violet Najmudin', '+62 (0153) 890-9036', 'mansurniyaga@perum.ac.id', 62, 'active'),
-(63, 'Amelia Pranowo, S.Kom', '+62 (020) 466 8394', 'hastutiikhsan@hotmail.com', 63, 'active'),
-(64, 'Hasim Nasyidah', '+62-73-905-3538', 'jagawibisono@hotmail.com', 64, 'active'),
-(65, 'dr. Azalea Nurdiyanti', '+62 (088) 273-7119', 'putranarji@yahoo.com', 65, 'active'),
-(66, 'Sutan Ismail Winarsih, S.I.Kom', '+62 (037) 477 1264', 'claradongoran@gmail.com', 66, 'active'),
-(67, 'Ulva Saptono, S.T.', '+62-0679-194-1260', 'bahuwarnanatsir@ud.my.id', 67, 'active'),
-(68, 'Banara Tamba, M.Pd', '+62 (263) 606-9295', 'whariyah@gmail.com', 68, 'active'),
-(69, 'Zizi Namaga, S.IP', '+62-94-233-1012', 'farhunnisa74@pt.ponpes.id', 69, 'active'),
-(70, 'Lembah Sihotang', '+62-0103-555-7562', 'nashiruddinhardi@hotmail.com', 70, 'active'),
-(71, 'Kenes Permata', '+62 (776) 736-6296', 'puspitajaya@perum.net', 71, 'active'),
-(72, 'Tgk. Emong Oktaviani', '(092) 092-6749', 'maryadidartono@yahoo.com', 72, 'active'),
-(73, 'Akarsana Manullang', '+62-005-269-4171', 'vhariyah@pt.web.id', 73, 'active'),
-(74, 'Ratih Hidayanto', '086 507 1911', 'siregarhilda@hotmail.com', 74, 'active'),
-(75, 'Siska Hardiansyah', '+62 (46) 952-9306', 'xhandayani@ud.mil.id', 75, 'active'),
-(76, 'Asirwanda Winarno, S.H.', '+62 (099) 000-4118', 'habibibahuwarna@pt.mil.id', 76, 'active'),
-(77, 'Calista Suryono', '+62-033-466-6674', 'lprasasta@ud.net.id', 77, 'active'),
-(78, 'Kamidin Halim', '+62 (018) 890-3282', 'dewihassanah@pt.sch.id', 78, 'active'),
-(79, 'Reksa Zulkarnain', '(0898) 383 9092', 'adriansyahcemplunk@yahoo.com', 79, 'active'),
-(80, 'Eko Mandala, M.Ak', '+62 (0463) 395 5295', 'damanikkanda@pt.co.id', 80, 'active'),
-(81, 'Cici Sihotang', '(0011) 739 7101', 'atma53@pd.gov', 81, 'active'),
-(82, 'Paris Wibisono', '+62 (071) 287 0393', 'cahya27@ud.id', 82, 'active'),
-(83, 'Asirwada Agustina', '+62 (83) 475 0849', 'apermata@pt.co.id', 83, 'active'),
-(84, 'Nabila Damanik', '+62 (029) 487-4707', 'oliva75@ud.sch.id', 84, 'active'),
-(85, 'R. Anastasia Saptono', '+62 (019) 278 6742', 'mursininfirmansyah@cv.gov', 85, 'active'),
-(86, 'Zulfa Rahmawati', '+62-071-136-4350', 'rjanuar@cv.org', 86, 'active'),
-(87, 'Labuh Budiman, S.Ked', '+62 (45) 375-7475', 'hanasimanjuntak@cv.my.id', 87, 'active'),
-(88, 'Gangsa Utami', '+62-036-293-9393', 'yyuniar@gmail.com', 88, 'active'),
-(89, 'Drs. Jane Riyanti', '(0234) 084-3611', 'pranowoicha@pd.mil', 89, 'active'),
-(90, 'Agnes Pradana', '(0482) 906-0148', 'martanahastuti@yahoo.com', 90, 'active'),
-(91, 'dr. Jarwa Sihombing', '+62 (30) 751-9181', 'faridatantri@gmail.com', 91, 'active'),
-(92, 'Arta Hidayat, S.Kom', '+62 (0428) 975-8982', 'olgakurniawan@ud.net', 92, 'active'),
-(93, 'Caturangga Suryono, M.Ak', '+62 (472) 829-8018', 'nnapitupulu@ud.int', 93, 'active'),
-(94, 'Almira Halim', '+62 (0178) 629-4096', 'asmianto87@hotmail.com', 94, 'active'),
-(95, 'Nyana Kusmawati, S.Kom', '0810175726', 'badriansyah@perum.org', 95, 'active'),
-(96, 'Karya Nasyidah, S.Ked', '+62-555-361-1129', 'ismailwidiastuti@perum.web.id', 96, 'active'),
-(97, 'Ani Mulyani', '+62 (037) 022-1028', 'balijan32@hotmail.com', 97, 'active'),
-(98, 'Dadi Hastuti', '+62-0473-020-7394', 'wiboworaden@hotmail.com', 98, 'active'),
-(99, 'Ade Kurniawan', '(0252) 855-1936', 'eagustina@ud.mil.id', 99, 'active'),
-(100, 'Tgk. Imam Sirait', '(047) 659-0281', 'wahyunicakrawangsa@pd.mil.id', 100, 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `pic_details`
---
-
-CREATE TABLE `pic_details` (
-  `pic_detail_id` int(11) NOT NULL,
-  `campaign_id` int(11) DEFAULT NULL,
-  `pic_id` int(11) DEFAULT NULL,
-  `assigned_date` date DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `pic_details`
---
-
-INSERT INTO `pic_details` (`pic_detail_id`, `campaign_id`, `pic_id`, `assigned_date`) VALUES
-(1, 67, 1, '2025-06-08'),
-(2, 47, 2, '2025-03-12'),
-(3, 80, 3, '2025-02-15'),
-(4, 97, 4, '2025-05-31'),
-(5, 64, 5, '2025-03-07'),
-(6, 81, 6, '2025-03-01'),
-(7, 57, 7, '2025-02-19'),
-(8, 98, 8, '2025-06-01'),
-(9, 7, 9, '2025-01-01'),
-(10, 27, 10, '2025-02-27'),
-(11, 35, 11, '2025-04-24'),
-(12, 71, 12, '2025-02-28'),
-(13, 17, 13, '2025-03-06'),
-(14, 37, 14, '2025-02-17'),
-(15, 57, 15, '2025-01-03'),
-(16, 90, 16, '2025-05-09'),
-(17, 63, 17, '2025-03-04'),
-(18, 16, 18, '2025-03-18'),
-(19, 4, 19, '2025-04-01'),
-(20, 81, 20, '2025-01-03'),
-(21, 78, 21, '2025-02-09'),
-(22, 31, 22, '2025-02-25'),
-(23, 91, 23, '2025-01-24'),
-(24, 21, 24, '2025-03-18'),
-(25, 40, 25, '2025-03-16'),
-(26, 71, 26, '2025-05-24'),
-(27, 2, 27, '2025-05-08'),
-(28, 71, 28, '2025-03-12'),
-(29, 53, 29, '2025-03-20'),
-(30, 12, 30, '2025-05-13'),
-(31, 29, 31, '2025-05-04'),
-(32, 15, 32, '2025-05-26'),
-(33, 60, 33, '2025-05-05'),
-(34, 16, 34, '2025-01-01'),
-(35, 83, 35, '2025-01-09'),
-(36, 20, 36, '2025-01-02'),
-(37, 64, 37, '2025-03-20'),
-(38, 92, 38, '2025-01-09'),
-(39, 38, 39, '2025-05-31'),
-(40, 66, 40, '2025-02-08'),
-(41, 91, 41, '2025-04-04'),
-(42, 35, 42, '2025-05-24'),
-(43, 54, 43, '2025-05-06'),
-(44, 62, 44, '2025-01-08'),
-(45, 61, 45, '2025-01-18'),
-(46, 32, 46, '2025-04-20'),
-(47, 59, 47, '2025-05-10'),
-(48, 71, 48, '2025-04-15'),
-(49, 19, 49, '2025-01-25'),
-(50, 50, 50, '2025-03-29'),
-(51, 25, 51, '2025-01-07'),
-(52, 77, 52, '2025-04-21'),
-(53, 66, 53, '2025-01-17'),
-(54, 96, 54, '2025-05-21'),
-(55, 18, 55, '2025-01-10'),
-(56, 9, 56, '2025-05-23'),
-(57, 36, 57, '2025-06-09'),
-(58, 99, 58, '2025-03-13'),
-(59, 54, 59, '2025-02-26'),
-(60, 44, 60, '2025-01-31'),
-(61, 65, 61, '2025-04-11'),
-(62, 35, 62, '2025-04-09'),
-(63, 1, 63, '2025-06-08'),
-(64, 37, 64, '2025-06-08'),
-(65, 93, 65, '2025-05-22'),
-(66, 39, 66, '2025-05-23'),
-(67, 76, 67, '2025-01-30'),
-(68, 75, 68, '2025-02-19'),
-(69, 85, 69, '2025-01-08'),
-(70, 63, 70, '2025-05-11'),
-(71, 20, 71, '2025-01-14'),
-(72, 58, 72, '2025-05-20'),
-(73, 69, 73, '2025-01-04'),
-(74, 62, 74, '2025-01-13'),
-(75, 45, 75, '2025-01-10'),
-(76, 43, 76, '2025-04-22'),
-(77, 71, 77, '2025-04-12'),
-(78, 98, 78, '2025-03-03'),
-(79, 70, 79, '2025-03-09'),
-(80, 49, 80, '2025-05-26'),
-(81, 59, 81, '2025-03-21'),
-(82, 42, 82, '2025-01-20'),
-(83, 25, 83, '2025-03-28'),
-(84, 90, 84, '2025-05-14'),
-(85, 31, 85, '2025-01-25'),
-(86, 74, 86, '2025-03-22'),
-(87, 50, 87, '2025-05-13'),
-(88, 30, 88, '2025-04-18'),
-(89, 100, 89, '2025-05-18'),
-(90, 53, 90, '2025-02-17'),
-(91, 6, 91, '2025-04-24'),
-(92, 41, 92, '2025-04-16'),
-(93, 96, 93, '2025-05-14'),
-(94, 61, 94, '2025-01-04'),
-(95, 91, 95, '2025-01-23'),
-(96, 49, 96, '2025-04-26'),
-(97, 50, 97, '2025-05-30'),
-(98, 85, 98, '2025-04-20'),
-(99, 84, 99, '2025-02-06'),
-(100, 20, 100, '2025-02-24');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `recyclebin`
---
-
-CREATE TABLE `recyclebin` (
-  `bin_id` int(11) NOT NULL,
-  `location_id` int(11) DEFAULT NULL,
-  `bin_type` varchar(50) DEFAULT NULL,
-  `capacity_kg` decimal(5,2) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `recyclebin`
---
-
-INSERT INTO `recyclebin` (`bin_id`, `location_id`, `bin_type`, `capacity_kg`, `status`) VALUES
-(1, 1, 'Plastic', 9.95, 'active'),
-(2, 2, 'Plastic', 10.93, 'active'),
-(3, 3, 'Paper', 40.55, 'active'),
-(4, 4, 'Plastic', 31.50, 'active'),
-(5, 5, 'Plastic', 12.84, 'active'),
-(6, 6, 'Plastic', 10.70, 'active'),
-(7, 7, 'Paper', 28.67, 'active'),
-(8, 8, 'Metal', 7.86, 'active'),
-(9, 9, 'Paper', 40.01, 'active'),
-(10, 10, 'Metal', 31.71, 'active'),
-(11, 11, 'Paper', 27.67, 'active'),
-(12, 12, 'Metal', 6.95, 'active'),
-(13, 13, 'Metal', 28.47, 'active'),
-(14, 14, 'Paper', 33.95, 'active'),
-(15, 15, 'Plastic', 7.74, 'active'),
-(16, 16, 'Paper', 43.13, 'active'),
-(17, 17, 'Paper', 35.87, 'active'),
-(18, 18, 'Paper', 37.06, 'active'),
-(19, 19, 'Paper', 8.31, 'active'),
-(20, 20, 'Plastic', 19.50, 'active'),
-(21, 21, 'Plastic', 7.96, 'active'),
-(22, 22, 'Paper', 33.09, 'active'),
-(23, 23, 'Metal', 29.68, 'active'),
-(24, 24, 'Paper', 22.14, 'active'),
-(25, 25, 'Metal', 28.88, 'active'),
-(26, 26, 'Paper', 27.75, 'active'),
-(27, 27, 'Paper', 9.46, 'active'),
-(28, 28, 'Metal', 10.15, 'active'),
-(29, 29, 'Metal', 34.29, 'active'),
-(30, 30, 'Metal', 37.44, 'active'),
-(31, 31, 'Plastic', 24.35, 'active'),
-(32, 32, 'Plastic', 23.62, 'active'),
-(33, 33, 'Paper', 22.94, 'active'),
-(34, 34, 'Metal', 9.28, 'active'),
-(35, 35, 'Paper', 19.06, 'active'),
-(36, 36, 'Paper', 21.84, 'active'),
-(37, 37, 'Plastic', 35.91, 'active'),
-(38, 38, 'Paper', 8.02, 'active'),
-(39, 39, 'Plastic', 9.20, 'active'),
-(40, 40, 'Plastic', 38.51, 'active'),
-(41, 41, 'Paper', 41.53, 'active'),
-(42, 42, 'Metal', 7.70, 'active'),
-(43, 43, 'Metal', 30.28, 'active'),
-(44, 44, 'Metal', 10.50, 'active'),
-(45, 45, 'Paper', 44.31, 'active'),
-(46, 46, 'Paper', 44.06, 'active'),
-(47, 47, 'Metal', 7.32, 'active'),
-(48, 48, 'Paper', 32.02, 'active'),
-(49, 49, 'Paper', 9.66, 'active'),
-(50, 50, 'Metal', 14.57, 'active'),
-(51, 51, 'Metal', 26.70, 'active'),
-(52, 52, 'Plastic', 20.76, 'active'),
-(53, 53, 'Metal', 21.54, 'active'),
-(54, 54, 'Paper', 30.83, 'active'),
-(55, 55, 'Paper', 43.03, 'active'),
-(56, 56, 'Metal', 32.61, 'active'),
-(57, 57, 'Metal', 30.05, 'active'),
-(58, 58, 'Metal', 46.81, 'active'),
-(59, 59, 'Metal', 17.04, 'active'),
-(60, 60, 'Plastic', 17.30, 'active'),
-(61, 61, 'Paper', 46.47, 'active'),
-(62, 62, 'Paper', 5.27, 'active'),
-(63, 63, 'Plastic', 30.48, 'active'),
-(64, 64, 'Paper', 8.13, 'active'),
-(65, 65, 'Metal', 33.49, 'active'),
-(66, 66, 'Plastic', 9.13, 'active'),
-(67, 67, 'Metal', 14.68, 'active'),
-(68, 68, 'Paper', 25.41, 'active'),
-(69, 69, 'Plastic', 21.65, 'active'),
-(70, 70, 'Metal', 19.60, 'active'),
-(71, 71, 'Metal', 31.83, 'active'),
-(72, 72, 'Plastic', 12.00, 'active'),
-(73, 73, 'Metal', 7.24, 'active'),
-(74, 74, 'Plastic', 17.24, 'active'),
-(75, 75, 'Metal', 24.08, 'active'),
-(76, 76, 'Metal', 24.89, 'active'),
-(77, 77, 'Paper', 14.70, 'active'),
-(78, 78, 'Metal', 10.12, 'active'),
-(79, 79, 'Paper', 9.99, 'active'),
-(80, 80, 'Metal', 35.53, 'active'),
-(81, 81, 'Paper', 28.71, 'active'),
-(82, 82, 'Paper', 7.04, 'active'),
-(83, 83, 'Paper', 49.30, 'active'),
-(84, 84, 'Plastic', 5.35, 'active'),
-(85, 85, 'Paper', 47.54, 'active'),
-(86, 86, 'Plastic', 39.39, 'active'),
-(87, 87, 'Paper', 19.77, 'active'),
-(88, 88, 'Plastic', 27.38, 'active'),
-(89, 89, 'Paper', 12.91, 'active'),
-(90, 90, 'Paper', 28.97, 'active'),
-(91, 91, 'Plastic', 27.51, 'active'),
-(92, 92, 'Metal', 41.28, 'active'),
-(93, 93, 'Plastic', 22.87, 'active'),
-(94, 94, 'Metal', 6.90, 'active'),
-(95, 95, 'Plastic', 25.69, 'active'),
-(96, 96, 'Plastic', 43.79, 'active'),
-(97, 97, 'Metal', 24.32, 'active'),
-(98, 98, 'Paper', 36.93, 'active'),
-(99, 99, 'Paper', 18.03, 'active'),
-(100, 100, 'Paper', 5.94, 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `recyclingactivity`
---
-
-CREATE TABLE `recyclingactivity` (
-  `activity_id` int(11) NOT NULL,
-  `campaign_id` int(11) DEFAULT NULL,
-  `user_id` int(11) DEFAULT NULL,
-  `recycling_type_id` int(11) DEFAULT NULL,
-  `weight_kg` decimal(5,2) DEFAULT NULL,
-  `date` date DEFAULT NULL,
-  `verified_by` int(11) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `recyclingactivity`
---
-
-INSERT INTO `recyclingactivity` (`activity_id`, `campaign_id`, `user_id`, `recycling_type_id`, `weight_kg`, `date`, `verified_by`, `status`) VALUES
-(1, 42, 22, 5, 4.87, '2025-04-01', 89, 'verified'),
-(2, 47, 12, 4, 8.52, '2025-04-12', 32, 'verified'),
-(3, 56, 76, 4, 5.48, '2025-01-07', 51, 'verified'),
-(4, 40, 96, 3, 2.60, '2025-03-21', 100, 'verified'),
-(5, 22, 10, 5, 6.52, '2025-03-29', 68, 'verified'),
-(6, 66, 25, 3, 3.84, '2025-04-14', 83, 'verified'),
-(7, 19, 31, 1, 1.89, '2025-02-19', 26, 'verified'),
-(8, 23, 78, 2, 7.72, '2025-05-26', 84, 'verified'),
-(9, 10, 23, 4, 4.91, '2025-01-28', 73, 'verified'),
-(10, 98, 75, 4, 6.97, '2025-04-20', 73, 'verified'),
-(11, 83, 82, 5, 3.57, '2025-04-25', 81, 'verified'),
-(12, 41, 20, 4, 1.15, '2025-04-19', 57, 'verified'),
-(13, 81, 39, 3, 6.12, '2025-04-01', 46, 'verified'),
-(14, 65, 10, 3, 4.89, '2025-05-24', 5, 'verified'),
-(15, 8, 48, 3, 1.23, '2025-03-04', 12, 'verified'),
-(16, 79, 77, 5, 4.15, '2025-05-14', 75, 'verified'),
-(17, 71, 95, 1, 4.77, '2025-03-01', 74, 'verified'),
-(18, 84, 25, 3, 6.25, '2025-01-14', 65, 'verified'),
-(19, 20, 8, 4, 1.48, '2025-06-03', 44, 'verified'),
-(20, 92, 11, 5, 6.64, '2025-02-01', 6, 'verified'),
-(21, 32, 91, 4, 9.91, '2025-03-12', 68, 'verified'),
-(22, 67, 79, 2, 3.96, '2025-01-28', 37, 'verified'),
-(23, 50, 53, 3, 6.95, '2025-05-25', 7, 'verified'),
-(24, 81, 83, 3, 1.13, '2025-01-10', 13, 'verified'),
-(25, 72, 87, 4, 3.20, '2025-03-28', 93, 'verified'),
-(26, 85, 78, 2, 3.67, '2025-04-20', 75, 'verified'),
-(27, 85, 19, 3, 3.45, '2025-03-29', 84, 'verified'),
-(28, 90, 85, 4, 1.73, '2025-01-28', 91, 'verified'),
-(29, 11, 40, 5, 4.08, '2025-01-03', 43, 'verified'),
-(30, 17, 86, 5, 1.39, '2025-05-23', 86, 'verified'),
-(31, 55, 66, 3, 0.67, '2025-03-25', 40, 'verified'),
-(32, 24, 28, 3, 9.50, '2025-02-01', 63, 'verified'),
-(33, 25, 29, 2, 1.97, '2025-05-22', 38, 'verified'),
-(34, 13, 65, 5, 8.43, '2025-06-07', 68, 'verified'),
-(35, 5, 85, 3, 8.83, '2025-02-02', 80, 'verified'),
-(36, 17, 77, 4, 1.97, '2025-05-20', 24, 'verified'),
-(37, 89, 99, 5, 8.19, '2025-06-06', 22, 'verified'),
-(38, 93, 57, 1, 4.40, '2025-04-13', 87, 'verified'),
-(39, 93, 31, 4, 6.30, '2025-02-18', 97, 'verified'),
-(40, 96, 58, 2, 5.57, '2025-04-14', 40, 'verified'),
-(41, 61, 25, 3, 6.94, '2025-02-09', 74, 'verified'),
-(42, 57, 60, 3, 7.89, '2025-02-07', 65, 'verified'),
-(43, 68, 54, 2, 8.26, '2025-02-19', 78, 'verified'),
-(44, 18, 33, 1, 6.59, '2025-03-21', 48, 'verified'),
-(45, 71, 14, 5, 8.59, '2025-05-30', 37, 'verified'),
-(46, 11, 98, 2, 3.09, '2025-06-06', 66, 'verified'),
-(47, 19, 56, 1, 9.49, '2025-06-03', 29, 'verified'),
-(48, 58, 45, 1, 4.44, '2025-01-25', 51, 'verified'),
-(49, 65, 48, 2, 4.17, '2025-04-07', 11, 'verified'),
-(50, 48, 29, 1, 3.53, '2025-05-09', 13, 'verified'),
-(51, 92, 84, 3, 8.02, '2025-02-28', 18, 'verified'),
-(52, 5, 37, 4, 7.11, '2025-01-10', 18, 'verified'),
-(53, 98, 91, 4, 4.76, '2025-04-20', 1, 'verified'),
-(54, 11, 3, 3, 2.55, '2025-01-01', 20, 'verified'),
-(55, 71, 94, 5, 5.51, '2025-04-08', 15, 'verified'),
-(56, 100, 37, 2, 3.36, '2025-01-26', 7, 'verified'),
-(57, 31, 54, 5, 4.84, '2025-01-11', 15, 'verified'),
-(58, 64, 77, 5, 0.66, '2025-01-23', 66, 'verified'),
-(59, 74, 31, 2, 3.27, '2025-01-17', 1, 'verified'),
-(60, 79, 46, 2, 5.92, '2025-04-10', 24, 'verified'),
-(61, 86, 86, 1, 5.47, '2025-01-27', 47, 'verified'),
-(62, 9, 68, 5, 5.32, '2025-06-01', 65, 'verified'),
-(63, 71, 3, 4, 8.80, '2025-05-04', 6, 'verified'),
-(64, 82, 50, 3, 2.91, '2025-01-30', 3, 'verified'),
-(65, 46, 9, 3, 2.79, '2025-05-08', 85, 'verified'),
-(66, 81, 14, 5, 7.48, '2025-05-12', 43, 'verified'),
-(67, 18, 6, 3, 5.69, '2025-02-24', 83, 'verified'),
-(68, 23, 100, 4, 9.82, '2025-02-02', 62, 'verified'),
-(69, 81, 24, 2, 1.10, '2025-05-11', 100, 'verified'),
-(70, 59, 5, 3, 2.42, '2025-02-08', 26, 'verified'),
-(71, 6, 41, 3, 5.40, '2025-04-12', 70, 'verified'),
-(72, 61, 33, 1, 7.66, '2025-03-28', 25, 'verified'),
-(73, 37, 46, 1, 8.73, '2025-04-12', 43, 'verified'),
-(74, 35, 16, 3, 4.65, '2025-02-13', 52, 'verified'),
-(75, 96, 57, 4, 3.72, '2025-02-20', 24, 'verified'),
-(76, 64, 89, 4, 3.99, '2025-05-03', 67, 'verified'),
-(77, 35, 11, 4, 1.25, '2025-05-26', 78, 'verified'),
-(78, 24, 70, 3, 3.55, '2025-05-17', 11, 'verified'),
-(79, 42, 85, 3, 3.41, '2025-04-14', 78, 'verified'),
-(80, 92, 55, 2, 7.05, '2025-03-11', 45, 'verified'),
-(81, 58, 6, 3, 6.34, '2025-04-05', 56, 'verified'),
-(82, 36, 82, 1, 1.21, '2025-06-08', 82, 'verified'),
-(83, 52, 47, 5, 8.11, '2025-05-09', 87, 'verified'),
-(84, 21, 4, 2, 8.56, '2025-04-12', 87, 'verified'),
-(85, 57, 5, 2, 1.14, '2025-06-02', 100, 'verified'),
-(86, 83, 47, 3, 4.14, '2025-04-29', 73, 'verified'),
-(87, 5, 78, 2, 6.95, '2025-01-08', 48, 'verified'),
-(88, 48, 57, 1, 5.95, '2025-05-27', 68, 'verified'),
-(89, 47, 51, 3, 6.67, '2025-02-16', 32, 'verified'),
-(90, 15, 4, 2, 5.24, '2025-04-05', 50, 'verified'),
-(91, 72, 16, 3, 7.86, '2025-01-10', 91, 'verified'),
-(92, 58, 28, 5, 3.21, '2025-05-08', 63, 'verified'),
-(93, 26, 16, 2, 8.60, '2025-01-21', 58, 'verified'),
-(94, 23, 92, 4, 9.97, '2025-03-07', 88, 'verified'),
-(95, 41, 86, 3, 7.24, '2025-01-14', 71, 'verified'),
-(96, 70, 38, 3, 8.59, '2025-01-08', 92, 'verified'),
-(97, 91, 90, 2, 8.04, '2025-05-20', 66, 'verified'),
-(98, 29, 16, 2, 8.02, '2025-03-26', 31, 'verified'),
-(99, 64, 4, 3, 5.76, '2025-05-03', 48, 'verified'),
-(100, 60, 71, 2, 6.31, '2025-06-05', 12, 'verified');
-
---
--- Triggers `recyclingactivity`
---
-DELIMITER $$
-CREATE TRIGGER `trg_auto_set_student_active_on_activity` AFTER INSERT ON `recyclingactivity` FOR EACH ROW BEGIN
-    IF NEW.status = 'verified' THEN
-        UPDATE STUDENT
-        SET status = 'active'
-        WHERE stud_id = NEW.user_id;
-    END IF;
-END
-$$
-DELIMITER ;
-DELIMITER $$
-CREATE TRIGGER `trg_verifikasi_aktivitas_to_poin` AFTER UPDATE ON `recyclingactivity` FOR EACH ROW BEGIN
-    DECLARE v_poin INT;
-
-
-    IF OLD.status != 'verified' AND NEW.status = 'verified' THEN
-        SET v_poin = fn_konversi_berat_ke_poin(NEW.weight_kg);
-
-
-        INSERT INTO BYN(user_id, campaign_id, point_amount, timestamp)
-        VALUES (NEW.user_id, NULL, v_poin, NOW());
-    END IF;
-END
-$$
-DELIMITER ;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `rewardredemption`
---
-
-CREATE TABLE `rewardredemption` (
-  `redemption_id` int(11) NOT NULL,
-  `user_id` int(11) DEFAULT NULL,
-  `reward_id` int(11) DEFAULT NULL,
-  `redeemed_at` datetime DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `rewardredemption`
---
-
-INSERT INTO `rewardredemption` (`redemption_id`, `user_id`, `reward_id`, `redeemed_at`, `status`) VALUES
-(1, 88, 79, '2025-04-14 08:35:06', 'redeemed'),
-(2, 16, 17, '2025-04-30 16:11:22', 'redeemed'),
-(3, 13, 51, '2025-04-01 05:58:01', 'redeemed'),
-(4, 48, 44, '2025-05-24 01:05:51', 'redeemed'),
-(5, 72, 47, '2025-05-20 13:14:15', 'redeemed'),
-(6, 97, 19, '2025-06-01 10:03:06', 'redeemed'),
-(7, 26, 78, '2025-05-10 13:17:55', 'redeemed'),
-(8, 66, 52, '2025-05-25 20:06:21', 'redeemed'),
-(9, 65, 6, '2025-06-05 21:16:58', 'redeemed'),
-(10, 6, 5, '2025-02-02 13:11:59', 'redeemed'),
-(11, 18, 92, '2025-05-30 09:56:27', 'redeemed'),
-(12, 43, 61, '2025-01-31 02:46:45', 'redeemed'),
-(13, 67, 59, '2025-01-02 06:04:37', 'redeemed'),
-(14, 20, 78, '2025-02-08 13:45:25', 'redeemed'),
-(15, 66, 18, '2025-05-28 01:06:12', 'redeemed'),
-(16, 42, 79, '2025-02-16 19:42:12', 'redeemed'),
-(17, 41, 21, '2025-01-26 10:06:52', 'redeemed'),
-(18, 51, 79, '2025-04-19 18:46:06', 'redeemed'),
-(19, 95, 39, '2025-05-28 11:35:57', 'redeemed'),
-(20, 76, 44, '2025-04-08 07:17:37', 'redeemed'),
-(21, 65, 66, '2025-03-02 02:43:23', 'redeemed'),
-(22, 69, 63, '2025-05-12 01:32:12', 'redeemed'),
-(23, 91, 73, '2025-01-09 04:24:15', 'redeemed'),
-(24, 39, 61, '2025-05-31 21:28:36', 'redeemed'),
-(25, 3, 48, '2025-04-25 22:16:30', 'redeemed'),
-(26, 43, 87, '2025-03-14 00:00:28', 'redeemed'),
-(27, 15, 54, '2025-05-29 13:15:42', 'redeemed'),
-(28, 75, 40, '2025-01-17 04:54:23', 'redeemed'),
-(29, 93, 89, '2025-02-13 19:27:31', 'redeemed'),
-(30, 81, 4, '2025-04-21 01:39:03', 'redeemed'),
-(31, 77, 61, '2025-03-05 07:07:28', 'redeemed'),
-(32, 34, 84, '2025-03-30 17:44:45', 'redeemed'),
-(33, 100, 75, '2025-05-26 06:28:29', 'redeemed'),
-(34, 74, 30, '2025-04-19 09:28:22', 'redeemed'),
-(35, 93, 7, '2025-01-31 13:07:14', 'redeemed'),
-(36, 75, 62, '2025-06-02 21:54:43', 'redeemed'),
-(37, 22, 68, '2025-05-11 04:26:03', 'redeemed'),
-(38, 81, 93, '2025-03-11 01:26:49', 'redeemed'),
-(39, 80, 100, '2025-04-14 15:03:08', 'redeemed'),
-(40, 49, 19, '2025-01-28 01:43:13', 'redeemed'),
-(41, 88, 32, '2025-01-01 01:03:41', 'redeemed'),
-(42, 5, 74, '2025-02-17 09:23:30', 'redeemed'),
-(43, 90, 15, '2025-03-02 12:40:56', 'redeemed'),
-(44, 25, 3, '2025-06-08 10:49:04', 'redeemed'),
-(45, 57, 41, '2025-01-31 03:35:11', 'redeemed'),
-(46, 54, 20, '2025-04-27 01:35:36', 'redeemed'),
-(47, 53, 89, '2025-02-26 23:02:23', 'redeemed'),
-(48, 27, 53, '2025-01-17 01:41:36', 'redeemed'),
-(49, 65, 100, '2025-05-17 08:12:32', 'redeemed'),
-(50, 79, 61, '2025-03-11 19:33:16', 'redeemed'),
-(51, 95, 94, '2025-02-15 17:55:49', 'redeemed'),
-(52, 8, 91, '2025-05-24 15:54:28', 'redeemed'),
-(53, 18, 67, '2025-05-27 13:28:46', 'redeemed'),
-(54, 27, 72, '2025-05-24 04:29:42', 'redeemed'),
-(55, 42, 85, '2025-03-07 22:34:52', 'redeemed'),
-(56, 62, 68, '2025-02-07 12:47:20', 'redeemed'),
-(57, 49, 41, '2025-01-18 16:33:28', 'redeemed'),
-(58, 23, 59, '2025-01-06 08:55:03', 'redeemed'),
-(59, 69, 44, '2025-02-21 12:44:15', 'redeemed'),
-(60, 70, 46, '2025-01-26 14:50:28', 'redeemed'),
-(61, 87, 99, '2025-01-16 19:49:17', 'redeemed'),
-(62, 93, 88, '2025-01-26 10:58:59', 'redeemed'),
-(63, 83, 89, '2025-04-14 09:34:10', 'redeemed'),
-(64, 34, 79, '2025-02-19 09:06:02', 'redeemed'),
-(65, 62, 25, '2025-03-01 14:23:10', 'redeemed'),
-(66, 32, 36, '2025-03-19 11:21:59', 'redeemed'),
-(67, 72, 39, '2025-05-09 03:25:42', 'redeemed'),
-(68, 29, 39, '2025-02-05 04:24:46', 'redeemed'),
-(69, 99, 37, '2025-01-09 11:43:07', 'redeemed'),
-(70, 91, 27, '2025-04-17 10:42:10', 'redeemed'),
-(71, 89, 91, '2025-05-20 09:25:30', 'redeemed'),
-(72, 63, 41, '2025-01-13 06:42:57', 'redeemed'),
-(73, 62, 45, '2025-02-08 03:14:58', 'redeemed'),
-(74, 72, 93, '2025-02-17 18:53:52', 'redeemed'),
-(75, 36, 37, '2025-04-22 23:54:44', 'redeemed'),
-(76, 16, 74, '2025-01-23 17:12:31', 'redeemed'),
-(77, 87, 70, '2025-01-11 02:47:04', 'redeemed'),
-(78, 49, 51, '2025-01-21 03:13:29', 'redeemed'),
-(79, 45, 99, '2025-02-10 11:59:48', 'redeemed'),
-(80, 19, 38, '2025-03-18 17:15:24', 'redeemed'),
-(81, 6, 37, '2025-03-11 14:39:14', 'redeemed'),
-(82, 92, 11, '2025-05-16 11:43:25', 'redeemed'),
-(83, 45, 57, '2025-05-13 01:30:53', 'redeemed'),
-(84, 84, 33, '2025-04-17 03:37:17', 'redeemed'),
-(85, 96, 62, '2025-01-03 17:58:25', 'redeemed'),
-(86, 28, 26, '2025-05-30 13:44:24', 'redeemed'),
-(87, 69, 35, '2025-03-19 03:22:41', 'redeemed'),
-(88, 72, 90, '2025-04-06 00:00:15', 'redeemed'),
-(89, 35, 18, '2025-04-27 12:17:59', 'redeemed'),
-(90, 14, 79, '2025-03-28 05:16:06', 'redeemed'),
-(91, 95, 76, '2025-06-09 16:35:45', 'redeemed'),
-(92, 31, 32, '2025-05-17 23:58:32', 'redeemed'),
-(93, 7, 86, '2025-02-26 03:11:37', 'redeemed'),
-(94, 68, 29, '2025-02-07 13:12:09', 'redeemed'),
-(95, 82, 30, '2025-03-12 00:17:08', 'redeemed'),
-(96, 7, 13, '2025-01-15 18:02:34', 'redeemed'),
-(97, 53, 43, '2025-01-11 15:15:01', 'redeemed'),
-(98, 92, 61, '2025-04-13 04:55:35', 'redeemed'),
-(99, 13, 88, '2025-05-18 23:22:01', 'redeemed'),
-(100, 99, 18, '2025-04-06 14:24:16', 'redeemed');
-
---
--- Triggers `rewardredemption`
---
-DELIMITER $$
-CREATE TRIGGER `trg_decrease_reward_stock_after_redemption` AFTER INSERT ON `rewardredemption` FOR EACH ROW BEGIN
-    IF NEW.status = 'completed' THEN
-        UPDATE REWARD_ITEM
-        SET stock = stock - 1
-        WHERE id = NEW.reward_id;
-    END IF;
-END
-$$
-DELIMITER ;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `reward_item`
---
-
-CREATE TABLE `reward_item` (
-  `reward_id` int(11) NOT NULL,
-  `item_name` varchar(100) DEFAULT NULL,
-  `description` text DEFAULT NULL,
-  `points_required` int(11) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL,
-  `stock` int(11) DEFAULT 10
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `reward_item`
---
-
-INSERT INTO `reward_item` (`reward_id`, `item_name`, `description`, `points_required`, `status`, `stock`) VALUES
-(1, 'Reward 1', 'Ab a exercitationem.', 154, 'active', 10),
-(2, 'Reward 2', 'Magnam quaerat nobis ratione.', 224, 'active', 10),
-(3, 'Reward 3', 'Reiciendis voluptates fuga.', 360, 'active', 10),
-(4, 'Reward 4', 'Recusandae a ea saepe.', 123, 'active', 10),
-(5, 'Reward 5', 'Occaecati amet soluta vero.', 210, 'active', 10),
-(6, 'Reward 6', 'Non cum aliquid dolorum.', 491, 'active', 10),
-(7, 'Reward 7', 'Ut placeat iste a.', 417, 'active', 10),
-(8, 'Reward 8', 'Corrupti molestias libero in.', 213, 'active', 10),
-(9, 'Reward 9', 'Nemo ipsum vel neque.', 425, 'active', 10),
-(10, 'Reward 10', 'Vel odio eum voluptatem vel.', 490, 'active', 10),
-(11, 'Reward 11', 'Ullam doloremque magni totam.', 226, 'active', 10),
-(12, 'Reward 12', 'Mollitia iure in.', 254, 'active', 10),
-(13, 'Reward 13', 'Tempore veniam eveniet ea.', 116, 'active', 10),
-(14, 'Reward 14', 'Quam illum voluptatem quo.', 439, 'active', 10),
-(15, 'Reward 15', 'Nobis quae modi fugit.', 239, 'active', 10),
-(16, 'Reward 16', 'Esse atque quis.', 313, 'active', 10),
-(17, 'Reward 17', 'Eaque ab quisquam eum hic.', 337, 'active', 10),
-(18, 'Reward 18', 'Suscipit minima eius iste.', 104, 'active', 10),
-(19, 'Reward 19', 'Quo id aut dolor adipisci.', 213, 'active', 10),
-(20, 'Reward 20', 'Labore nesciunt iusto labore.', 173, 'active', 10),
-(21, 'Reward 21', 'Ex enim incidunt minus.', 288, 'active', 10),
-(22, 'Reward 22', 'Exercitationem officia sit.', 112, 'active', 10),
-(23, 'Reward 23', 'Vero nemo doloribus a.', 186, 'active', 10),
-(24, 'Reward 24', 'Delectus quasi explicabo est.', 280, 'active', 10),
-(25, 'Reward 25', 'Commodi explicabo omnis ipsa.', 176, 'active', 10),
-(26, 'Reward 26', 'Necessitatibus ducimus omnis.', 122, 'active', 10),
-(27, 'Reward 27', 'Rem magni autem dignissimos.', 99, 'active', 10),
-(28, 'Reward 28', 'Blanditiis illum qui.', 75, 'active', 10),
-(29, 'Reward 29', 'Autem dolorum aut.', 198, 'active', 10),
-(30, 'Reward 30', 'Ipsam iste rerum qui.', 246, 'active', 10),
-(31, 'Reward 31', 'Officia autem fugiat id.', 492, 'active', 10),
-(32, 'Reward 32', 'Deleniti in tempore a.', 365, 'active', 10),
-(33, 'Reward 33', 'Nostrum laborum nostrum.', 264, 'active', 10),
-(34, 'Reward 34', 'Illum nulla dolorem dolorum.', 177, 'active', 10),
-(35, 'Reward 35', 'Dolorum neque laboriosam.', 493, 'active', 10),
-(36, 'Reward 36', 'Inventore optio ullam nihil.', 131, 'active', 10),
-(37, 'Reward 37', 'Assumenda quibusdam alias.', 466, 'active', 10),
-(38, 'Reward 38', 'Magni quo illo nisi in porro.', 217, 'active', 10),
-(39, 'Reward 39', 'Eligendi unde odit.', 345, 'active', 10),
-(40, 'Reward 40', 'Culpa consequatur eum natus.', 419, 'active', 10),
-(41, 'Reward 41', 'Laborum accusantium vitae.', 210, 'active', 10),
-(42, 'Reward 42', 'Enim sequi magnam doloremque.', 147, 'active', 10),
-(43, 'Reward 43', 'Quae animi quasi.', 440, 'active', 10),
-(44, 'Reward 44', 'Qui aliquam eligendi dolores.', 131, 'active', 10),
-(45, 'Reward 45', 'Necessitatibus expedita quo.', 305, 'active', 10),
-(46, 'Reward 46', 'Quae tempora maxime minus.', 313, 'active', 10),
-(47, 'Reward 47', 'Expedita nisi dolorum magni.', 289, 'active', 10),
-(48, 'Reward 48', 'Veritatis ipsum sint.', 305, 'active', 10),
-(49, 'Reward 49', 'Ullam praesentium ad commodi.', 500, 'active', 10),
-(50, 'Reward 50', 'Esse ad nesciunt quod.', 207, 'active', 10),
-(51, 'Reward 51', 'Quis velit ipsa numquam fuga.', 304, 'active', 10),
-(52, 'Reward 52', 'Eum deserunt qui.', 61, 'active', 10),
-(53, 'Reward 53', 'Sit aperiam iste.', 96, 'active', 10),
-(54, 'Reward 54', 'A aut assumenda harum.', 251, 'active', 10),
-(55, 'Reward 55', 'Ipsa nobis nulla dolorem.', 308, 'active', 10),
-(56, 'Reward 56', 'At qui adipisci repudiandae.', 284, 'active', 10),
-(57, 'Reward 57', 'Nihil nostrum sed sint.', 173, 'active', 10),
-(58, 'Reward 58', 'Facere consequuntur autem.', 160, 'active', 10),
-(59, 'Reward 59', 'Soluta maiores quis.', 348, 'active', 10),
-(60, 'Reward 60', 'Illum ea qui nam.', 230, 'active', 10),
-(61, 'Reward 61', 'Quaerat voluptatum repellat.', 74, 'active', 10),
-(62, 'Reward 62', 'Porro dolorem maxime earum.', 75, 'active', 10),
-(63, 'Reward 63', 'Dolor eum aliquid.', 194, 'active', 10),
-(64, 'Reward 64', 'Incidunt impedit animi esse.', 303, 'active', 10),
-(65, 'Reward 65', 'Veniam placeat fuga.', 355, 'active', 10),
-(66, 'Reward 66', 'Dolorum explicabo ut quod.', 481, 'active', 10),
-(67, 'Reward 67', 'Ex tempore delectus.', 384, 'active', 10),
-(68, 'Reward 68', 'Occaecati nisi dicta eaque.', 394, 'active', 10),
-(69, 'Reward 69', 'Quia quae omnis sequi.', 290, 'active', 10),
-(70, 'Reward 70', 'Harum nesciunt rem.', 196, 'active', 10),
-(71, 'Reward 71', 'Error atque consequuntur.', 324, 'active', 10),
-(72, 'Reward 72', 'Labore odio nihil quas.', 54, 'active', 10),
-(73, 'Reward 73', 'Odit dolorum totam ab.', 483, 'active', 10),
-(74, 'Reward 74', 'Possimus fugiat odit non.', 105, 'active', 10),
-(75, 'Reward 75', 'Fugit facilis voluptatum.', 270, 'active', 10),
-(76, 'Reward 76', 'Officia odit omnis error.', 118, 'active', 10),
-(77, 'Reward 77', 'At vero sit dicta nihil eius.', 185, 'active', 10),
-(78, 'Reward 78', 'Fugit hic nostrum nisi quam.', 422, 'active', 10),
-(79, 'Reward 79', 'Repellendus eos commodi.', 237, 'active', 10),
-(80, 'Reward 80', 'Occaecati vel odit vitae eos.', 441, 'active', 10),
-(81, 'Reward 81', 'Eaque alias provident sit.', 256, 'active', 10),
-(82, 'Reward 82', 'Laudantium fugit est.', 237, 'active', 10),
-(83, 'Reward 83', 'Est ullam nam eligendi magni.', 73, 'active', 10),
-(84, 'Reward 84', 'Officia cum non debitis.', 255, 'active', 10),
-(85, 'Reward 85', 'Non nisi nesciunt suscipit.', 76, 'active', 10),
-(86, 'Reward 86', 'Vitae quis nemo amet.', 341, 'active', 10),
-(87, 'Reward 87', 'Nulla magnam suscipit.', 337, 'active', 10),
-(88, 'Reward 88', 'Pariatur blanditiis saepe.', 149, 'active', 10),
-(89, 'Reward 89', 'Cupiditate culpa ea corporis.', 235, 'active', 10),
-(90, 'Reward 90', 'Aperiam odio amet blanditiis.', 333, 'active', 10),
-(91, 'Reward 91', 'Fuga nisi doloribus non.', 197, 'active', 10),
-(92, 'Reward 92', 'Est ad deleniti quae.', 87, 'active', 10),
-(93, 'Reward 93', 'Autem error earum eius.', 247, 'active', 10),
-(94, 'Reward 94', 'Ea iste accusantium possimus.', 308, 'active', 10),
-(95, 'Reward 95', 'Nemo tempore libero optio.', 280, 'active', 10),
-(96, 'Reward 96', 'Dicta ipsum natus.', 441, 'active', 10),
-(97, 'Reward 97', 'Odio esse saepe.', 331, 'active', 10),
-(98, 'Reward 98', 'Quis eum mollitia dolore.', 193, 'active', 10),
-(99, 'Reward 99', 'Eaque molestiae temporibus.', 472, 'active', 10),
-(100, 'Reward 100', 'Officia distinctio rem.', 369, 'active', 10);
-
---
--- Triggers `reward_item`
---
-DELIMITER $$
-CREATE TRIGGER `trg_status_reward_out_of_stock` AFTER UPDATE ON `reward_item` FOR EACH ROW BEGIN
-    IF NEW.stock = 0 AND OLD.stock > 0 THEN
-        UPDATE REWARD_ITEM
-        SET status = 'out_of_stock'
-        WHERE reward_id = NEW.reward_id;
-    END IF;
-END
-$$
-DELIMITER ;
-
--- --------------------------------------------------------
-
---
--- Table structure for table `staff`
---
-
-CREATE TABLE `staff` (
-  `staff_id` int(11) NOT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `dept_id` int(11) DEFAULT NULL,
-  `faculty_id` int(11) DEFAULT NULL,
-  `phone` varchar(20) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `staff`
---
-
-INSERT INTO `staff` (`staff_id`, `name`, `email`, `dept_id`, `faculty_id`, `phone`, `status`) VALUES
-(1, 'Cindy Hutasoit', 'xsuwarno@pt.org', 8, 1, '(0160) 657 0936', 'active'),
-(2, 'Praba Narpati', 'yance12@yahoo.com', 18, 2, '+62 (049) 697-0816', 'active'),
-(3, 'Ega Januar', 'rajatacengkal@pd.mil', 15, 2, '+62 (0601) 513-4163', 'active'),
-(4, 'Ajimat Sirait', 'darman18@yahoo.com', 7, 6, '(0136) 125-8077', 'active'),
-(5, 'Pia Napitupulu', 'suartinicakrawangsa@cv.ponpes.id', 35, 1, '+62-0112-832-0685', 'active'),
-(6, 'Daniswara Aryani, M.TI.', 'mandalajayeng@pt.ponpes.id', 38, 4, '+62 (0411) 716 0541', 'active'),
-(7, 'Gilda Saptono', 'lembahlailasari@ud.web.id', 3, 1, '081 060 1199', 'active'),
-(8, 'Vivi Wastuti', 'radika37@perum.gov', 6, 2, '0846954911', 'active'),
-(9, 'dr. Ifa Nababan', 'khardiansyah@gmail.com', 15, 5, '+62-285-536-4270', 'active'),
-(10, 'Olga Kurniawan', 'anggabaya13@ud.mil.id', 39, 1, '+62-022-082-3190', 'active'),
-(11, 'dr. Mahesa Safitri, S.H.', 'ibun65@cv.biz.id', 36, 2, '(0637) 986 1929', 'active'),
-(12, 'Jumadi Hutasoit', 'usamahtami@hotmail.com', 35, 4, '+62-940-883-8775', 'active'),
-(13, 'Eman Halim, S.T.', 'ranggriawan@hotmail.com', 15, 4, '+62 (04) 916-9882', 'active'),
-(14, 'Puti Susanti', 'saragihslamet@gmail.com', 38, 3, '081 494 8188', 'active'),
-(15, 'Ifa Mahendra', 'hadiprakasa@perum.ac.id', 1, 7, '+62-51-859-6926', 'active'),
-(16, 'Cut Vicky Purnawati', 'ranggamandala@pt.desa.id', 11, 6, '+62 (0693) 852-7719', 'active'),
-(17, 'H. Aditya Kusumo, S.Sos', 'queen87@hotmail.com', 28, 3, '(053) 780 7777', 'active'),
-(18, 'Irma Simanjuntak', 'vimannarpati@yahoo.com', 18, 2, '(030) 312 4595', 'active'),
-(19, 'Puti Lazuardi', 'mariahidayanto@yahoo.com', 14, 7, '+62 (640) 005 1959', 'active'),
-(20, 'R.M. Banara Rajata', 'sihotangatmaja@yahoo.com', 22, 1, '+62-89-876-1024', 'active'),
-(21, 'Gilda Tarihoran', 'sabri20@cv.ponpes.id', 6, 4, '+62 (0713) 535-4950', 'active'),
-(22, 'drg. Elon Lazuardi, S.I.Kom', 'dacin53@ud.or.id', 7, 3, '(0786) 277 7012', 'active'),
-(23, 'Timbul Mansur', 'mursita52@ud.mil.id', 23, 5, '+62-733-828-0064', 'active'),
-(24, 'Kardi Pradipta', 'handayanijamal@pd.com', 17, 7, '+62 (343) 794 9917', 'active'),
-(25, 'Violet Hutasoit', 'oastuti@perum.mil.id', 3, 6, '+62-0239-970-4262', 'active'),
-(26, 'Sutan Liman Sitompul, S.E.', 'usinaga@ud.mil', 30, 5, '+62 (0219) 932-2761', 'active'),
-(27, 'Ilsa Firgantoro', 'marpaunggamani@hotmail.com', 8, 4, '(0806) 052 2370', 'active'),
-(28, 'Tgk. Ina Tampubolon, S.Pt', 'prabowoibrahim@hotmail.com', 6, 5, '+62 (0903) 910 0595', 'active'),
-(29, 'Sutan Ivan Winarsih', 'karya25@gmail.com', 19, 7, '+62-072-844-2467', 'active'),
-(30, 'Bakiono Ramadan, S.Ked', 'raditya32@perum.web.id', 40, 7, '+62 (014) 869-3477', 'active'),
-(31, 'Lega Mandasari', 'galarkusmawati@gmail.com', 24, 5, '+62 (0109) 392 7316', 'active'),
-(32, 'Luthfi Narpati, M.Farm', 'suwarnocahyo@cv.net.id', 13, 6, '+62-069-305-2623', 'active'),
-(33, 'Farhunnisa Firmansyah', 'ganephartati@yahoo.com', 5, 1, '+62 (62) 596 3925', 'active'),
-(34, 'Rafi Simbolon', 'rina57@gmail.com', 15, 7, '087 792 8791', 'active'),
-(35, 'Hj. Jelita Suryono, S.Farm', 'bsiregar@perum.or.id', 19, 1, '+62 (042) 006-2367', 'active'),
-(36, 'R.A. Nadia Januar, M.TI.', 'panduwijayanti@gmail.com', 15, 7, '(035) 389 8534', 'active'),
-(37, 'Laswi Maheswara, S.I.Kom', 'sihombingemil@yahoo.com', 7, 4, '+62 (83) 230 1051', 'active'),
-(38, 'Rachel Purnawati, S.Kom', 'waskitaputri@ud.mil', 18, 4, '+62 (70) 099-0121', 'active'),
-(39, 'Laila Maryadi', 'olivia87@hotmail.com', 24, 2, '088 690 2903', 'active'),
-(40, 'Yessi Saragih', 'prabowosamsul@yahoo.com', 24, 3, '(065) 022 1574', 'active'),
-(41, 'Gaman Putra, M.Farm', 'mahfudsamosir@yahoo.com', 14, 6, '+62 (008) 277-4597', 'active'),
-(42, 'Putri Laksmiwati', 'ymaulana@cv.ac.id', 18, 6, '+62 (81) 470-6708', 'active'),
-(43, 'Prabowo Handayani', 'pangeranzulaika@cv.ponpes.id', 5, 5, '+62 (880) 466-6422', 'active'),
-(44, 'Maida Situmorang', 'nfarida@ud.gov', 11, 5, '+62 (281) 013-6489', 'active'),
-(45, 'Wakiman Winarno', 'tmahendra@pd.mil', 16, 2, '+62 (0968) 898 7058', 'active'),
-(46, 'Amelia Laksmiwati', 'clarapratama@yahoo.com', 30, 4, '+62-28-339-5398', 'active'),
-(47, 'Edi Sihombing', 'eka85@gmail.com', 18, 6, '+62-0259-264-5163', 'active'),
-(48, 'drg. Nilam Padmasari, M.Pd', 'opurnawati@perum.my.id', 36, 2, '081 482 2650', 'active'),
-(49, 'Faizah Utama', 'dadap96@pt.biz.id', 21, 7, '(0614) 172-7696', 'active'),
-(50, 'Lulut Saptono, M.Kom.', 'jaya30@gmail.com', 4, 2, '084 158 0386', 'active'),
-(51, 'Yuliana Najmudin', 'kwaskita@yahoo.com', 3, 7, '+62 (0817) 111 5734', 'active'),
-(52, 'Kani Mardhiyah', 'tambaadikara@perum.or.id', 21, 4, '+62-78-869-9917', 'active'),
-(53, 'Wulan Utami', 'zaenab56@hotmail.com', 18, 1, '+62 (22) 287 9092', 'active'),
-(54, 'Carub Prasetya', 'utamawinarsih@gmail.com', 14, 5, '+62 (085) 816 6856', 'active'),
-(55, 'Kasiyah Sirait', 'ghaliyatidamanik@ud.int', 21, 2, '+62 (949) 294-4342', 'active'),
-(56, 'Titi Winarno, S.IP', 'hamimaanggraini@hotmail.com', 32, 4, '0835005796', 'active'),
-(57, 'Cengkal Utama', 'nasimmansur@gmail.com', 30, 2, '+62 (150) 304-3530', 'active'),
-(58, 'R.A. Jasmin Haryanto', 'tarihoranpaiman@gmail.com', 17, 2, '+62-414-271-7898', 'active'),
-(59, 'Hj. Zulfa Pangestu, M.TI.', 'nashiruddinyunita@gmail.com', 16, 6, '+62 (077) 906 9746', 'active'),
-(60, 'Jasmin Riyanti', 'amelia64@perum.edu', 36, 5, '+62 (035) 380-8326', 'active'),
-(61, 'Satya Riyanti, S.Psi', 'kurnia19@yahoo.com', 17, 6, '+62-777-742-0001', 'active'),
-(62, 'Murti Damanik, S.E.', 'haryantorosman@perum.web.id', 38, 4, '(0198) 200 6833', 'active'),
-(63, 'Puti Winda Kusumo', 'balidinwijayanti@gmail.com', 38, 4, '(027) 983-5952', 'active'),
-(64, 'Rina Hardiansyah, S.Psi', 'suryonoyance@yahoo.com', 24, 2, '081 835 7482', 'active'),
-(65, 'drg. Karen Saputra, S.T.', 'enteng90@gmail.com', 9, 5, '+62 (0345) 319 1908', 'active'),
-(66, 'Ir. Jamal Napitupulu, S.I.Kom', 'mitramustofa@perum.biz.id', 32, 1, '+62 (73) 643 6317', 'active'),
-(67, 'Drs. Lalita Handayani', 'dipa02@gmail.com', 4, 7, '089 790 9300', 'active'),
-(68, 'Jessica Dongoran', 'mandalarachel@pd.net', 8, 2, '+62 (962) 856-1194', 'active'),
-(69, 'Umi Lestari', 'radityakuswandari@hotmail.com', 11, 7, '+62 (017) 392-8973', 'active'),
-(70, 'T. Aswani Kusumo, S.T.', 'paryani@pt.or.id', 28, 5, '+62 (067) 009-6554', 'active'),
-(71, 'Balapati Oktaviani', 'widiastutiajimin@pt.web.id', 5, 4, '+62-795-438-7847', 'active'),
-(72, 'Liman Pangestu', 'agustinaqori@cv.co.id', 25, 5, '(0234) 440-5770', 'active'),
-(73, 'R.M. Drajat Maryati', 'xmandala@hotmail.com', 30, 5, '+62 (007) 301-2805', 'active'),
-(74, 'Bagas Padmasari, S.Kom', 'ajiono36@pt.co.id', 17, 5, '(0173) 863-0949', 'active'),
-(75, 'Drs. Hafshah Hutagalung', 'asirwandakuswandari@pd.co.id', 1, 6, '+62 (0771) 662 1059', 'active'),
-(76, 'Tania Puspasari', 'xmulyani@cv.net', 8, 6, '+62-306-185-5243', 'active'),
-(77, 'Drs. Galar Purwanti, M.M.', 'reza21@hotmail.com', 35, 7, '(0210) 929 7468', 'active'),
-(78, 'Ana Riyanti, S.Ked', 'saadatuwais@ud.int', 18, 7, '(085) 120 9302', 'active'),
-(79, 'drg. Estiono Riyanti', 'prayitnapuspasari@yahoo.com', 22, 1, '+62 (012) 744 9850', 'active'),
-(80, 'Sutan Vinsen Rajata, S.Gz', 'lnovitasari@hotmail.com', 19, 4, '(015) 864-0378', 'active'),
-(81, 'Puti Wijaya', 'asmianto50@hotmail.com', 11, 4, '+62 (116) 899 7116', 'active'),
-(82, 'Darmaji Prasasta', 'rajatayusuf@yahoo.com', 1, 6, '(070) 038-5638', 'active'),
-(83, 'Rina Nasyidah, S.Pt', 'hairyantomarpaung@hotmail.com', 17, 5, '(063) 927-1327', 'active'),
-(84, 'Saadat Palastri', 'bakijan85@perum.sch.id', 12, 5, '+62 (0594) 767-9555', 'active'),
-(85, 'Karimah Suartini', 'iuyainah@hotmail.com', 7, 7, '+62 (573) 927 5677', 'active'),
-(86, 'Mala Siregar', 'lasmanto52@ud.co.id', 20, 7, '+62 (92) 870 5240', 'active'),
-(87, 'Wardi Salahudin', 'devi72@gmail.com', 33, 5, '(0966) 881-8666', 'active'),
-(88, 'Tgk. Vanya Gunawan, M.TI.', 'pnajmudin@gmail.com', 13, 2, '080 973 7695', 'active'),
-(89, 'Jasmin Nurdiyanti, M.M.', 'lukman77@gmail.com', 24, 7, '+62 (22) 889 4035', 'active'),
-(90, 'Chelsea Utama, S.IP', 'okto63@yahoo.com', 11, 5, '(019) 077 0541', 'active'),
-(91, 'Indah Maryati', 'ohariyah@pd.edu', 34, 1, '+62 (570) 849-3531', 'active'),
-(92, 'Uli Suryatmi', 'znashiruddin@ud.int', 39, 3, '+62 (016) 307 9749', 'active'),
-(93, 'Agnes Nasyidah', 'nsinaga@gmail.com', 32, 1, '(0202) 885 6439', 'active'),
-(94, 'Cici Hartati', 'pandunasyidah@perum.go.id', 8, 3, '+62 (917) 842 2865', 'active'),
-(95, 'Juli Gunawan', 'drajat38@pt.mil.id', 20, 2, '(0887) 417-1926', 'active'),
-(96, 'Irma Wijayanti', 'zulaikalaras@pd.edu', 4, 2, '0872841957', 'active'),
-(97, 'Eman Suwarno', 'purwantiputi@gmail.com', 37, 1, '+62 (0484) 203-8540', 'active'),
-(98, 'Raisa Iswahyudi', 'usyiputra@gmail.com', 6, 6, '+62 (428) 728-6699', 'active'),
-(99, 'Zelaya Zulkarnain, S.IP', 'parisrahayu@gmail.com', 32, 7, '(0072) 535-1863', 'active'),
-(100, 'Juli Sitompul', 'mustofaradika@pt.co.id', 5, 7, '(030) 489 7386', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `student`
---
-
-CREATE TABLE `student` (
-  `stud_id` int(11) NOT NULL,
-  `name` varchar(100) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `faculty_id` int(11) DEFAULT NULL,
-  `dept_id` int(11) DEFAULT NULL,
-  `phone` varchar(20) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `student`
---
-
-INSERT INTO `student` (`stud_id`, `name`, `email`, `faculty_id`, `dept_id`, `phone`, `status`) VALUES
-(1, 'Cemplunk Pangestu', 'candrakanta02@cv.mil', 2, 28, '+62 (0039) 653 6320', 'active'),
-(2, 'Lintang Tarihoran', 'zulfa43@gmail.com', 7, 38, '+62 (554) 271 9447', 'active'),
-(3, 'Iriana Agustina', 'setiawansatya@ud.ponpes.id', 5, 21, '+62-072-588-0209', 'active'),
-(4, 'Dt. Lurhur Padmasari', 'adhiarjapudjiastuti@hotmail.com', 4, 29, '(012) 019-9625', 'active'),
-(5, 'Paramita Ardianto, M.M.', 'esaragih@pt.biz.id', 4, 14, '+62 (74) 392 7176', 'active'),
-(6, 'Prabowo Siregar', 'putripranowo@cv.ac.id', 5, 31, '+62 (103) 472 7566', 'active'),
-(7, 'Tgk. Hendri Gunawan, M.TI.', 'kalimhandayani@hotmail.com', 7, 11, '+62-747-149-9385', 'active'),
-(8, 'Slamet Wacana', 'hlaksmiwati@gmail.com', 6, 6, '+62 (0712) 620 7213', 'active'),
-(9, 'Najwa Padmasari', 'reksa52@ud.org', 3, 33, '(0417) 391 5463', 'active'),
-(10, 'Jais Mardhiyah, M.Farm', 'puspitacakrawala@gmail.com', 6, 40, '(0308) 532-0390', 'active'),
-(11, 'Ibrani Tampubolon', 'citramulyani@yahoo.com', 3, 6, '084 307 6041', 'active'),
-(12, 'Hartaka Waskita, M.M.', 'yuniaratma@gmail.com', 7, 16, '087 401 2084', 'active'),
-(13, 'Natalia Agustina, S.H.', 'itarihoran@perum.ac.id', 6, 20, '+62 (768) 354 5034', 'active'),
-(14, 'H. Danu Kurniawan', 'indah76@yahoo.com', 2, 13, '+62-0328-460-8284', 'active'),
-(15, 'R.A. Icha Irawan', 'ynatsir@gmail.com', 2, 2, '(0424) 620 3688', 'active'),
-(16, 'Putri Utama', 'mulya95@pt.desa.id', 1, 16, '+62 (07) 446-7099', 'active'),
-(17, 'R.M. Anggabaya Latupono', 'birawan@pd.sch.id', 4, 40, '+62 (008) 384-7738', 'active'),
-(18, 'Laswi Latupono', 'lalafirgantoro@pd.edu', 7, 5, '+62 (180) 378-9078', 'active'),
-(19, 'Sabar Salahudin', 'titiwidodo@gmail.com', 4, 27, '+62 (0516) 633 5598', 'active'),
-(20, 'Gangsa Simanjuntak', 'novitasarigaduh@yahoo.com', 6, 37, '+62-0321-181-9332', 'active'),
-(21, 'Wulan Handayani', 'bhastuti@cv.ac.id', 2, 25, '+62-73-166-1938', 'active'),
-(22, 'Lintang Utami', 'ehardiansyah@gmail.com', 4, 26, '(085) 826 1318', 'active'),
-(23, 'dr. Mulyanto Maulana', 'kairav45@gmail.com', 2, 10, '+62 (0048) 768-8050', 'active'),
-(24, 'Ophelia Astuti', 'mansurkarja@hotmail.com', 6, 1, '+62 (53) 598 2086', 'active'),
-(25, 'Eka Prakasa', 'hmanullang@hotmail.com', 7, 7, '(089) 326-5361', 'active'),
-(26, 'Hasta Widodo', 'csitorus@gmail.com', 7, 28, '+62 (95) 831-4308', 'active'),
-(27, 'Dr. Bella Melani', 'cemplunk15@cv.ac.id', 2, 12, '+62-13-767-2922', 'active'),
-(28, 'Karen Waskita', 'mardhiyahgara@hotmail.com', 7, 34, '+62 (597) 969 1410', 'active'),
-(29, 'Gambira Situmorang', 'kmaryadi@perum.int', 4, 4, '+62 (563) 229-6873', 'active'),
-(30, 'Catur Sudiati', 'sidiqrahimah@pd.edu', 5, 16, '(075) 197-3691', 'active'),
-(31, 'Hardi Saefullah', 'wsaptono@hotmail.com', 7, 8, '(0426) 095 6355', 'active'),
-(32, 'R.A. Icha Damanik', 'wibisonokasiran@yahoo.com', 4, 9, '+62 (979) 255-9258', 'active'),
-(33, 'KH. Gangsar Manullang, S.Sos', 'xgunawan@pt.net', 7, 30, '+62 (02) 979 4929', 'active'),
-(34, 'Puti Victoria Mustofa, S.Psi', 'panduusada@hotmail.com', 6, 34, '0846498215', 'active'),
-(35, 'Maryadi Agustina', 'winarnokarsa@ud.or.id', 5, 39, '+62 (979) 813-3857', 'active'),
-(36, 'Hasan Nababan', 'hamimapermata@gmail.com', 3, 29, '0818659885', 'active'),
-(37, 'Drs. Tania Saragih, S.E.I', 'nugrahamahendra@cv.go.id', 5, 33, '+62 (090) 426 5527', 'active'),
-(38, 'Lantar Mandasari', 'aurora35@hotmail.com', 4, 36, '(003) 444-3356', 'active'),
-(39, 'H. Luwes Suryatmi, M.TI.', 'narpatigamani@gmail.com', 4, 11, '+62 (0585) 277-3274', 'active'),
-(40, 'Yusuf Mardhiyah', 'nasab78@yahoo.com', 6, 31, '+62-991-842-5900', 'active'),
-(41, 'drg. Marwata Waluyo', 'irawanzelda@ud.ac.id', 4, 17, '+62 (0711) 442-7668', 'active'),
-(42, 'Bagus Utami', 'margana24@yahoo.com', 7, 16, '0888938487', 'active'),
-(43, 'Endah Nuraini', 'halimahmakara@yahoo.com', 7, 18, '+62-01-586-0074', 'active'),
-(44, 'Uchita Tarihoran', 'donowaskita@hotmail.com', 7, 34, '+62-0241-922-2971', 'active'),
-(45, 'R. Purwanto Widiastuti', 'rnajmudin@gmail.com', 4, 16, '080 933 8940', 'active'),
-(46, 'Hardi Firmansyah', 'kusumafirmansyah@cv.mil.id', 3, 29, '086 503 3637', 'active'),
-(47, 'Lamar Mayasari', 'mariaprayoga@perum.net', 1, 19, '+62 (67) 523-7726', 'active'),
-(48, 'Puti Agnes Mandala, S.Farm', 'dalimin49@gmail.com', 2, 18, '+62 (0649) 432 1276', 'active'),
-(49, 'Silvia Nainggolan', 'wage73@gmail.com', 3, 21, '+62-889-737-7062', 'active'),
-(50, 'Sadina Puspita', 'atma19@hotmail.com', 5, 6, '+62 (0091) 923-3006', 'active'),
-(51, 'Dr. Kenes Ardianto, M.Kom.', 'suryonojagaraga@cv.ac.id', 2, 10, '(016) 926 7372', 'active'),
-(52, 'Uli Wahyuni', 'yuniarvivi@perum.sch.id', 2, 25, '+62 (057) 509-2924', 'active'),
-(53, 'Gina Andriani', 'bfirgantoro@hotmail.com', 6, 10, '+62-27-135-9931', 'active'),
-(54, 'Titin Lazuardi', 'zsimanjuntak@hotmail.com', 6, 14, '+62 (81) 030-9245', 'active'),
-(55, 'Jati Hasanah', 'yuliartitirta@cv.mil.id', 1, 27, '+62 (237) 194 1527', 'active'),
-(56, 'Lasmanto Laksmiwati, S.Pd', 'hakimjindra@pt.my.id', 4, 22, '+62 (041) 846 2262', 'active'),
-(57, 'Tgk. Vivi Wastuti, S.Ked', 'ssimbolon@pd.or.id', 5, 30, '+62 (005) 346 2195', 'active'),
-(58, 'Novi Siregar', 'twidodo@perum.com', 4, 4, '+62 (0137) 006-4457', 'active'),
-(59, 'Tiara Samosir', 'purwayuniar@gmail.com', 2, 27, '0891230697', 'active'),
-(60, 'Karen Rajata', 'sabrina30@hotmail.com', 4, 38, '+62 (056) 123-1282', 'active'),
-(61, 'Mulyanto Nasyidah', 'rnainggolan@gmail.com', 6, 2, '+62 (0635) 574 0380', 'active'),
-(62, 'Azalea Puspasari', 'balangga48@pd.edu', 7, 37, '+62 (511) 000-1784', 'active'),
-(63, 'Soleh Siregar', 'paiman27@hotmail.com', 4, 31, '+62 (200) 806 2499', 'active'),
-(64, 'Dimas Laksita', 'damanikrudi@ud.desa.id', 1, 23, '(0808) 445 2712', 'active'),
-(65, 'Simon Pradipta', 'damanikpaiman@pt.gov', 3, 25, '(0766) 805 4888', 'active'),
-(66, 'dr. Nasim Pangestu', 'vivi66@yahoo.com', 7, 27, '+62 (16) 366-3723', 'active'),
-(67, 'Ir. Rahayu Ardianto, M.Farm', 'rardianto@hotmail.com', 5, 35, '+62 (80) 755 1075', 'active'),
-(68, 'Ir. Jono Wacana, M.Ak', 'pmustofa@yahoo.com', 7, 39, '+62-0389-331-8073', 'active'),
-(69, 'Rini Maheswara', 'radityawacana@yahoo.com', 2, 32, '+62 (0000) 812 4182', 'active'),
-(70, 'Banawa Maryati', 'ismailardianto@pt.co.id', 2, 18, '+62-030-248-4061', 'active'),
-(71, 'Putri Farida, S.Kom', 'cramadan@cv.com', 4, 32, '+62-988-226-4028', 'active'),
-(72, 'Ir. Ani Laksmiwati', 'kasimnovitasari@perum.sch.id', 1, 25, '0892785175', 'active'),
-(73, 'Soleh Utama', 'warta16@yahoo.com', 3, 26, '(0308) 656 2801', 'active'),
-(74, 'Jarwi Rahayu', 'rajasaharto@yahoo.com', 6, 11, '+62 (0871) 953-1739', 'active'),
-(75, 'Lanang Haryanto', 'alikajanuar@gmail.com', 7, 30, '080 598 9384', 'active'),
-(76, 'Ani Wahyuni, S.Kom', 'susantibajragin@ud.id', 2, 40, '+62-0476-819-3302', 'active'),
-(77, 'Tgk. Kuncara Utama', 'enuraini@hotmail.com', 5, 2, '(045) 268-9438', 'active'),
-(78, 'Ayu Permata', 'gara65@hotmail.com', 4, 38, '0864712956', 'active'),
-(79, 'Tgk. Candrakanta Widodo, S.E.', 'okuswandari@ud.ac.id', 5, 2, '(0264) 319-2752', 'active'),
-(80, 'Asmianto Halimah', 'vivigunarto@hotmail.com', 1, 28, '(0704) 319 4255', 'active'),
-(81, 'Sakti Mulyani', 'purwadi61@gmail.com', 2, 30, '(047) 141 9186', 'active'),
-(82, 'Fitria Kusumo, S.Ked', 'nurdiyanticaturangga@hotmail.com', 2, 4, '+62-0854-246-6089', 'active'),
-(83, 'Kardi Firmansyah', 'padmakusumo@gmail.com', 3, 25, '+62-276-994-2503', 'active'),
-(84, 'Gaman Waskita', 'gsinaga@yahoo.com', 3, 14, '+62 (094) 305 0951', 'active'),
-(85, 'Tari Palastri', 'rahayuratna@pt.org', 4, 21, '+62-850-677-3047', 'active'),
-(86, 'Dr. Julia Mardhiyah, S.Ked', 'mangunsonggaliono@cv.id', 3, 25, '+62-49-558-9194', 'active'),
-(87, 'Gina Rajata, S.H.', 'vhidayat@yahoo.com', 3, 27, '0899121500', 'active'),
-(88, 'Talia Marbun', 'lpratiwi@yahoo.com', 3, 6, '+62 (067) 643-1761', 'active'),
-(89, 'Lidya Namaga', 'naradi67@cv.biz.id', 4, 2, '+62 (42) 505 5683', 'active'),
-(90, 'Lintang Maheswara', 'vanesa93@pt.biz.id', 6, 35, '+62 (86) 008-2572', 'active'),
-(91, 'drg. Puji Uwais', 'kajenwasita@perum.net', 1, 23, '+62 (346) 361-8665', 'active'),
-(92, 'Siska Novitasari', 'luluhsihombing@pd.id', 2, 5, '(0098) 069 8711', 'active'),
-(93, 'H. Jarwadi Tarihoran', 'chandra71@pd.int', 7, 3, '+62 (982) 695 5673', 'active'),
-(94, 'Asmadi Purnawati', 'baktiantoriyanti@hotmail.com', 7, 2, '(068) 317-2739', 'active'),
-(95, 'Halim Irawan', 'almira04@pt.ponpes.id', 2, 13, '(0164) 259-9847', 'active'),
-(96, 'Hj. Nabila Halim, S.Pt', 'usudiati@pd.int', 7, 2, '+62 (0339) 711-7857', 'active'),
-(97, 'Tari Widodo', 'makutaoktaviani@hotmail.com', 5, 10, '0827169208', 'active'),
-(98, 'Belinda Putra', 'cahyonositumorang@pt.int', 2, 9, '+62 (0305) 505 7825', 'active'),
-(99, 'Dr. Perkasa Najmudin, M.M.', 'tarihoranjohan@yahoo.com', 4, 8, '(077) 084-6726', 'active'),
-(100, 'Nova Handayani', 'irma13@pt.mil.id', 5, 14, '(028) 007 5495', 'active');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `sustainability_campaign`
---
-
-CREATE TABLE `sustainability_campaign` (
-  `campaign_id` int(11) NOT NULL,
-  `campaign_name` varchar(100) DEFAULT NULL,
-  `start_date` date DEFAULT NULL,
-  `end_date` date DEFAULT NULL,
-  `description` text DEFAULT NULL,
-  `total_points` int(11) DEFAULT NULL,
-  `created_by` int(11) DEFAULT NULL,
-  `created_at` datetime DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `sustainability_campaign`
---
-
-INSERT INTO `sustainability_campaign` (`campaign_id`, `campaign_name`, `start_date`, `end_date`, `description`, `total_points`, `created_by`, `created_at`) VALUES
-(1, 'Campaign 1', '2023-11-15', '2024-01-17', 'Ullam sequi repellat.', 69, 14, '2025-04-12 14:18:58'),
-(2, 'Campaign 2', '2023-10-03', '2024-10-10', 'Alias suscipit ipsam impedit officiis.', 390, 71, '2025-02-10 11:11:45'),
-(3, 'Campaign 3', '2024-05-11', '2024-09-16', 'Labore similique accusamus rerum animi.', 89, 35, '2025-04-26 11:12:32'),
-(4, 'Campaign 4', '2023-08-08', '2025-04-13', 'Amet est tempore dignissimos.', 154, 78, '2025-06-03 17:46:41'),
-(5, 'Campaign 5', '2024-02-13', '2024-04-12', 'Accusantium nobis quae hic accusantium.', 117, 92, '2025-03-26 07:30:27'),
-(6, 'Campaign 6', '2024-01-06', '2024-04-05', 'Necessitatibus veniam iste alias eveniet tempora.', 185, 27, '2025-05-21 23:54:01'),
-(7, 'Campaign 7', '2023-07-02', '2025-03-21', 'A repudiandae repellat.', 361, 82, '2025-05-25 06:18:47'),
-(8, 'Campaign 8', '2024-01-30', '2025-01-16', 'A maxime earum vero.', 446, 34, '2025-05-15 09:54:59'),
-(9, 'Campaign 9', '2023-10-14', '2023-10-25', 'Delectus nemo impedit consequuntur quos.', 268, 63, '2025-06-07 10:13:53'),
-(10, 'Campaign 10', '2023-12-06', '2025-05-06', 'Unde consectetur ipsam vel dignissimos.', 138, 7, '2025-01-21 06:59:35'),
-(11, 'Campaign 11', '2023-10-17', '2024-07-15', 'Voluptas minus quos suscipit.', 57, 82, '2025-02-07 01:28:35'),
-(12, 'Campaign 12', '2023-09-29', '2023-10-18', 'Doloremque minus aliquid.', 226, 36, '2025-03-21 21:44:03'),
-(13, 'Campaign 13', '2024-02-28', '2025-01-10', 'Facere sapiente sunt animi impedit doloribus.', 32, 1, '2025-02-19 00:00:15'),
-(14, 'Campaign 14', '2024-03-27', '2024-06-04', 'Numquam accusantium sequi expedita voluptatem et.', 180, 99, '2025-03-23 22:37:13'),
-(15, 'Campaign 15', '2023-10-03', '2023-11-26', 'Cumque eum animi est molestias.', 76, 82, '2025-02-27 17:03:25'),
-(16, 'Campaign 16', '2024-02-15', '2024-04-10', 'Libero id quo officia iure quo temporibus quis.', 144, 21, '2025-05-13 11:28:29'),
-(17, 'Campaign 17', '2023-11-26', '2024-06-29', 'Quo animi quia.', 389, 57, '2025-02-22 03:30:42'),
-(18, 'Campaign 18', '2024-02-11', '2024-07-18', 'Itaque libero itaque.', 292, 91, '2025-05-25 17:50:30'),
-(19, 'Campaign 19', '2024-06-06', '2024-10-28', 'Esse reprehenderit accusamus repellat.', 228, 72, '2025-05-10 05:15:30'),
-(20, 'Campaign 20', '2023-09-10', '2024-07-19', 'Minus ex hic quibusdam magni suscipit dicta.', 14, 15, '2025-01-18 18:00:49'),
-(21, 'Campaign 21', '2023-08-22', '2023-10-23', 'A repudiandae placeat quos.', 48, 89, '2025-04-05 01:36:25'),
-(22, 'Campaign 22', '2023-07-08', '2024-03-25', 'Illo laboriosam illo ducimus.', 472, 20, '2025-01-07 15:38:46'),
-(23, 'Campaign 23', '2023-09-27', '2024-08-23', 'Impedit ipsa eum explicabo earum sint.', 289, 5, '2025-02-11 19:13:33'),
-(24, 'Campaign 24', '2023-07-25', '2024-07-03', 'Neque vel modi alias.', 437, 48, '2025-02-18 11:23:49'),
-(25, 'Campaign 25', '2023-08-20', '2024-11-03', 'Natus ipsum omnis unde aliquid.', 308, 71, '2025-02-14 02:06:49'),
-(26, 'Campaign 26', '2023-12-15', '2024-11-07', 'Voluptatibus eaque nisi vel veritatis eius magni.', 85, 56, '2025-06-05 18:49:00'),
-(27, 'Campaign 27', '2023-12-08', '2024-06-03', 'Quae dolore architecto perspiciatis debitis.', 75, 6, '2025-04-14 19:16:54'),
-(28, 'Campaign 28', '2024-05-07', '2024-12-06', 'Omnis atque eius harum consequuntur.', 167, 47, '2025-02-05 12:56:14'),
-(29, 'Campaign 29', '2024-02-08', '2025-06-01', 'Et officia quo aliquid placeat ad voluptate.', 470, 6, '2025-05-27 15:09:33'),
-(30, 'Campaign 30', '2023-12-16', '2025-03-15', 'Recusandae quidem minima vel recusandae.', 470, 46, '2025-05-21 07:32:54'),
-(31, 'Campaign 31', '2023-08-09', '2024-12-30', 'Distinctio saepe sapiente.', 117, 88, '2025-04-28 03:28:34'),
-(32, 'Campaign 32', '2023-07-01', '2024-01-17', 'Similique velit ducimus rem dolores maxime.', 137, 86, '2025-03-21 03:10:05'),
-(33, 'Campaign 33', '2024-01-01', '2024-02-09', 'Sit dolore ab omnis repellendus maxime modi.', 62, 46, '2025-05-17 06:33:14'),
-(34, 'Campaign 34', '2023-11-19', '2024-07-17', 'Perferendis ratione nisi minus quia.', 409, 72, '2025-03-26 10:08:47'),
-(35, 'Campaign 35', '2024-02-15', '2024-12-08', 'Rerum sit adipisci natus ex.', 462, 53, '2025-06-09 08:41:36'),
-(36, 'Campaign 36', '2024-02-25', '2024-08-18', 'Sequi asperiores unde quas aspernatur eos quasi.', 327, 96, '2025-04-30 16:46:13'),
-(37, 'Campaign 37', '2023-09-06', '2024-05-18', 'Eum quo ullam libero error amet. Id ex quaerat.', 89, 31, '2025-04-03 16:10:06'),
-(38, 'Campaign 38', '2024-04-08', '2024-06-22', 'Vel eum quidem eligendi deserunt tenetur.', 452, 21, '2025-03-27 16:32:28'),
-(39, 'Campaign 39', '2023-08-04', '2024-02-18', 'Assumenda nemo nemo ullam eum exercitationem.', 419, 23, '2025-02-16 08:11:24'),
-(40, 'Campaign 40', '2023-07-02', '2024-07-08', 'Aspernatur at est deleniti soluta deleniti culpa.', 461, 53, '2025-03-14 07:13:00'),
-(41, 'Campaign 41', '2023-07-05', '2024-02-07', 'Rerum a vel aspernatur doloribus ipsum.', 22, 23, '2025-04-03 23:06:03'),
-(42, 'Campaign 42', '2024-01-28', '2024-08-04', 'Commodi dolore sint quaerat voluptates.', 387, 43, '2025-04-06 18:30:53'),
-(43, 'Campaign 43', '2024-01-15', '2025-01-18', 'Consectetur eaque earum quam.', 410, 53, '2025-01-28 02:32:45'),
-(44, 'Campaign 44', '2023-11-02', '2025-01-21', 'Omnis minus fugiat eaque occaecati ipsam odio.', 420, 86, '2025-03-07 23:34:57'),
-(45, 'Campaign 45', '2023-11-28', '2024-02-09', 'Eius dignissimos quasi beatae odit.', 452, 95, '2025-01-05 06:01:30'),
-(46, 'Campaign 46', '2023-07-09', '2025-01-01', 'Debitis minima iure ratione cupiditate occaecati.', 425, 32, '2025-05-08 10:09:31'),
-(47, 'Campaign 47', '2024-02-04', '2024-07-31', 'Esse reprehenderit nihil quas libero libero.', 146, 21, '2025-01-09 05:53:52'),
-(48, 'Campaign 48', '2024-03-21', '2024-11-08', 'Accusantium earum veniam alias enim inventore.', 413, 90, '2025-03-24 22:12:51'),
-(49, 'Campaign 49', '2023-06-24', '2024-12-17', 'Accusamus beatae fugit sunt at.', 65, 49, '2025-01-01 10:33:55'),
-(50, 'Campaign 50', '2024-02-03', '2024-07-10', 'Natus perspiciatis laborum.', 456, 5, '2025-05-11 02:17:50'),
-(51, 'Campaign 51', '2024-03-13', '2025-02-25', 'Minus ullam doloribus unde illo.', 449, 61, '2025-02-19 01:28:24'),
-(52, 'Campaign 52', '2024-01-02', '2024-05-15', 'Laudantium unde perspiciatis cumque veritatis.', 123, 26, '2025-03-21 07:15:56'),
-(53, 'Campaign 53', '2023-07-06', '2024-08-23', 'Commodi magni porro harum laborum repudiandae.', 428, 59, '2025-01-11 10:41:40'),
-(54, 'Campaign 54', '2024-01-07', '2024-12-10', 'Eveniet voluptate fuga nam ratione.', 189, 40, '2025-05-17 18:41:09'),
-(55, 'Campaign 55', '2023-11-21', '2024-12-29', 'Ea dolorum provident totam et nemo.', 430, 30, '2025-03-13 12:25:08'),
-(56, 'Campaign 56', '2023-12-15', '2025-01-26', 'Voluptate fugiat tempore hic quae.', 124, 4, '2025-05-26 04:18:55'),
-(57, 'Campaign 57', '2023-07-12', '2024-05-18', 'Perferendis tempore ratione reprehenderit earum.', 347, 25, '2025-05-11 04:04:33'),
-(58, 'Campaign 58', '2024-01-16', '2024-02-06', 'Ea deleniti alias deleniti.', 214, 43, '2025-03-08 06:36:19'),
-(59, 'Campaign 59', '2023-06-19', '2024-05-20', 'Odit repudiandae pariatur suscipit perferendis.', 152, 9, '2025-05-11 01:03:34'),
-(60, 'Campaign 60', '2023-12-01', '2024-10-21', 'Facilis quos ratione fugiat.', 405, 36, '2025-05-24 23:00:46'),
-(61, 'Campaign 61', '2024-01-04', '2024-04-13', 'Inventore totam delectus iusto.', 189, 83, '2025-05-13 09:16:03'),
-(62, 'Campaign 62', '2023-07-11', '2025-03-09', 'Odio quo nemo qui omnis corrupti molestias.', 270, 52, '2025-04-03 06:19:55'),
-(63, 'Campaign 63', '2024-02-06', '2025-05-04', 'Cupiditate omnis enim laboriosam incidunt.', 357, 69, '2025-03-16 22:26:01'),
-(64, 'Campaign 64', '2023-06-30', '2023-09-09', 'Inventore distinctio dolorem odit sint.', 179, 4, '2025-01-23 16:12:46'),
-(65, 'Campaign 65', '2023-09-24', '2024-12-14', 'Possimus aliquam quibusdam eos.', 69, 34, '2025-06-06 01:00:44'),
-(66, 'Campaign 66', '2023-12-19', '2024-10-19', 'Perferendis unde minus enim iste.', 101, 75, '2025-05-19 11:51:59'),
-(67, 'Campaign 67', '2023-09-23', '2024-06-14', 'Est cum aperiam nam perferendis.', 145, 5, '2025-05-29 06:07:23'),
-(68, 'Campaign 68', '2023-07-07', '2025-05-12', 'Non cumque animi fuga cumque nesciunt.', 65, 77, '2025-04-11 01:23:31'),
-(69, 'Campaign 69', '2023-11-21', '2024-09-02', 'Reprehenderit nobis vel.', 232, 45, '2025-02-03 00:48:00'),
-(70, 'Campaign 70', '2023-08-08', '2024-09-09', 'Eum culpa tempora assumenda.', 383, 41, '2025-02-09 17:22:48'),
-(71, 'Campaign 71', '2024-04-08', '2024-04-29', 'Laudantium laboriosam magni doloribus.', 233, 78, '2025-03-28 19:24:59'),
-(72, 'Campaign 72', '2024-06-06', '2024-08-27', 'Illum corporis quibusdam velit cupiditate.', 271, 15, '2025-01-12 16:03:40'),
-(73, 'Campaign 73', '2023-08-19', '2024-03-27', 'Explicabo delectus quos doloribus.', 207, 74, '2025-01-02 09:03:26'),
-(74, 'Campaign 74', '2023-07-21', '2024-10-09', 'Sequi non quo in eos molestiae.', 107, 33, '2025-01-31 03:44:29'),
-(75, 'Campaign 75', '2023-09-18', '2024-10-23', 'Excepturi eum qui nemo.', 32, 91, '2025-01-29 00:03:36'),
-(76, 'Campaign 76', '2023-07-23', '2024-08-31', 'Provident hic accusantium.', 233, 1, '2025-01-09 10:43:07'),
-(77, 'Campaign 77', '2024-05-12', '2024-12-26', 'Tenetur numquam dicta.', 276, 69, '2025-05-18 21:05:14'),
-(78, 'Campaign 78', '2023-06-30', '2024-05-03', 'Ipsa velit officiis pariatur.', 361, 93, '2025-03-07 14:22:45'),
-(79, 'Campaign 79', '2024-03-30', '2024-08-05', 'Labore ab tempora praesentium ab quas.', 491, 95, '2025-01-11 06:43:06'),
-(80, 'Campaign 80', '2024-01-27', '2024-08-31', 'Quibusdam esse libero facilis ea est distinctio.', 387, 86, '2025-04-12 07:24:09'),
-(81, 'Campaign 81', '2023-06-30', '2024-07-17', 'Esse pariatur doloribus ea quidem id.', 110, 47, '2025-04-25 18:19:41'),
-(82, 'Campaign 82', '2023-07-13', '2024-12-19', 'Dolor sunt recusandae illo.', 230, 9, '2025-03-03 16:47:34'),
-(83, 'Campaign 83', '2023-10-02', '2025-01-28', 'Voluptates quo impedit rerum eaque id.', 495, 86, '2025-02-23 17:15:58'),
-(84, 'Campaign 84', '2023-07-07', '2024-02-26', 'Harum illo nihil voluptate debitis.', 481, 43, '2025-02-16 12:41:20'),
-(85, 'Campaign 85', '2024-03-15', '2024-10-07', 'Animi sunt exercitationem.', 329, 41, '2025-04-26 07:04:45'),
-(86, 'Campaign 86', '2023-07-13', '2024-09-16', 'Commodi eius facilis. Repellendus hic ut velit.', 349, 16, '2025-03-03 08:54:00'),
-(87, 'Campaign 87', '2023-09-02', '2024-11-21', 'Dicta iste molestiae illo recusandae error.', 378, 39, '2025-03-22 10:11:09'),
-(88, 'Campaign 88', '2024-02-15', '2024-06-01', 'Vitae et ipsam placeat beatae iste.', 269, 40, '2025-01-05 20:13:39'),
-(89, 'Campaign 89', '2023-11-08', '2024-08-07', 'Vel assumenda enim eum blanditiis asperiores.', 351, 53, '2025-05-11 22:27:10'),
-(90, 'Campaign 90', '2023-09-22', '2025-01-27', 'Magnam deserunt occaecati. Animi earum quae.', 177, 52, '2025-02-04 00:39:16'),
-(91, 'Campaign 91', '2024-01-03', '2025-01-21', 'Voluptatum eum tempora amet qui neque nemo.', 366, 38, '2025-01-25 04:52:06'),
-(92, 'Campaign 92', '2024-01-29', '2025-02-24', 'Impedit dolor officia fuga.', 293, 17, '2025-03-11 00:30:54'),
-(93, 'Campaign 93', '2023-10-12', '2024-09-06', 'Odio earum ad maxime sequi possimus veniam amet.', 108, 54, '2025-06-08 20:16:19'),
-(94, 'Campaign 94', '2024-01-14', '2024-04-28', 'Ipsa quod saepe occaecati enim iure esse.', 350, 49, '2025-05-15 14:27:49'),
-(95, 'Campaign 95', '2023-09-10', '2025-05-14', 'Nam doloribus natus eos sapiente et.', 356, 96, '2025-02-10 00:07:09'),
-(96, 'Campaign 96', '2024-04-17', '2024-08-12', 'Praesentium illum excepturi.', 472, 23, '2025-03-18 05:02:10'),
-(97, 'Campaign 97', '2023-10-06', '2024-12-10', 'Reprehenderit ea voluptate fugiat atque.', 325, 73, '2025-04-24 20:04:04'),
-(98, 'Campaign 98', '2023-09-09', '2025-01-30', 'Veniam repudiandae a illo natus.', 164, 52, '2025-03-03 22:38:09'),
-(99, 'Campaign 99', '2023-07-09', '2024-02-04', 'Magnam nam nisi quisquam ullam.', 290, 1, '2025-03-30 18:59:19'),
-(100, 'Campaign 100', '2023-10-03', '2024-05-25', 'Et dignissimos corporis ducimus.', 165, 37, '2025-01-26 09:57:31');
-
--- --------------------------------------------------------
-
---
--- Table structure for table `sustainability_coordinator`
---
-
-CREATE TABLE `sustainability_coordinator` (
-  `staff_id` int(11) NOT NULL,
-  `fullname` varchar(100) DEFAULT NULL,
-  `phone` varchar(20) DEFAULT NULL,
-  `email` varchar(100) DEFAULT NULL,
-  `faculty_id` int(11) DEFAULT NULL,
-  `dept_id` int(11) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `sustainability_coordinator`
---
-
-INSERT INTO `sustainability_coordinator` (`staff_id`, `fullname`, `phone`, `email`, `faculty_id`, `dept_id`) VALUES
-(1, 'Natalia Maryadi', '(005) 400 3777', 'darufirmansyah@hotmail.com', 5, 9),
-(2, 'Nova Yuliarti', '+62 (640) 177-1405', 'xmangunsong@pd.desa.id', 2, 31),
-(3, 'Cayadi Tamba', '088 941 6301', 'salahudingarang@pt.sch.id', 5, 11),
-(4, 'Faizah Nasyiah', '+62 (768) 941-9329', 'wibisonogangsa@gmail.com', 3, 34),
-(5, 'Gawati Thamrin', '+62-0614-586-3076', 'jsamosir@gmail.com', 7, 39),
-(6, 'Melinda Rahayu', '+62 (05) 877 5481', 'gpradipta@pt.biz.id', 4, 14),
-(7, 'Karsana Yuniar', '+62 (023) 287-2828', 'wnapitupulu@pt.go.id', 5, 13),
-(8, 'Olivia Padmasari, M.M.', '+62 (57) 392 8885', 'anggriawanqori@perum.net.id', 6, 20),
-(9, 'dr. Karimah Mayasari', '+62 (72) 249-5696', 'sitompulteguh@cv.co.id', 4, 24),
-(10, 'Hamima Latupono', '+62 (042) 776 9982', 'asaptono@pt.int', 4, 34),
-(11, 'R. Michelle Pangestu, S.T.', '+62-94-392-2380', 'qutami@yahoo.com', 4, 8),
-(12, 'Rachel Maheswara, S.E.', '+62 (671) 248-9949', 'lantarsalahudin@pd.or.id', 2, 15),
-(13, 'Balangga Saefullah', '(0784) 902-1022', 'puspitakunthara@pt.sch.id', 1, 22),
-(14, 'Kairav Januar', '+62-0013-263-6879', 'ilailasari@pd.my.id', 1, 38),
-(15, 'Chelsea Wijayanti, S.T.', '+62 (0451) 076-8187', 'jarwa87@hotmail.com', 5, 15),
-(16, 'Aswani Hidayanto', '+62-015-721-7923', 'uutama@perum.or.id', 5, 15),
-(17, 'Tgk. Simon Andriani, M.Pd', '+62 (049) 675-9240', 'uyainahellis@ud.co.id', 1, 5),
-(18, 'KH. Oman Firgantoro', '+62 (061) 238-6263', 'nramadan@hotmail.com', 6, 4),
-(19, 'drg. Dewi Iswahyudi, S.H.', '+62 (930) 408 0048', 'mansurzelaya@ud.mil.id', 2, 5),
-(20, 'R. Kunthara Dabukke, S.Pd', '084 934 1454', 'nhakim@perum.ponpes.id', 1, 22),
-(21, 'Cut Ghaliyati Rahimah', '+62-041-415-2943', 'fthamrin@cv.gov', 1, 33),
-(22, 'Ulya Rajasa', '(0098) 077-3190', 'nurulsuartini@yahoo.com', 2, 18),
-(23, 'Malika Sihombing, S.T.', '+62 (44) 528-4435', 'omarbudiyanto@hotmail.com', 6, 32),
-(24, 'Ir. Kasiran Gunarto', '+62 (042) 876 0916', 'ihandayani@hotmail.com', 2, 35),
-(25, 'Jais Fujiati', '+62-570-540-3580', 'januaraurora@pd.or.id', 2, 37),
-(26, 'Wardi Budiyanto', '(0345) 200 3072', 'mustofacornelia@hotmail.com', 5, 31),
-(27, 'R. Jane Wijaya, S.Ked', '0848342950', 'nilam64@gmail.com', 2, 31),
-(28, 'Cut Salimah Habibi, S.E.I', '+62 (0167) 185 5297', 'wpratama@yahoo.com', 7, 27),
-(29, 'dr. Jamalia Mahendra, S.Gz', '+62 (034) 505 1891', 'adiarjawibowo@gmail.com', 2, 7),
-(30, 'Tgk. Paramita Namaga, S.Ked', '(0754) 069 2656', 'joko92@perum.net', 1, 28),
-(31, 'Dariati Anggriawan', '+62-521-104-2176', 'gabriella57@yahoo.com', 3, 28),
-(32, 'Bakiono Permadi', '(071) 316 6243', 'salwa54@ud.my.id', 4, 30),
-(33, 'Yosef Kusmawati', '(0105) 562 9983', 'sihombingmuhammad@perum.net.id', 7, 4),
-(34, 'Dalima Aryani', '+62 (051) 661 4167', 'jaemanandriani@yahoo.com', 6, 7),
-(35, 'Opan Ramadan', '+62-72-147-8594', 'bahuwarna32@cv.net', 1, 26),
-(36, 'Vicky Uwais', '(021) 424-5652', 'pranoworahmi@hotmail.com', 6, 22),
-(37, 'Jaya Sitompul', '0848042260', 'bakidinwijaya@pt.id', 7, 7),
-(38, 'Irnanto Mayasari', '0879732484', 'gamantosalahudin@perum.int', 2, 13),
-(39, 'Lili Maryati, S.H.', '+62 (085) 850-1300', 'widiastutilintang@yahoo.com', 2, 35),
-(40, 'Icha Usamah', '+62-124-514-9395', 'parisagustina@gmail.com', 4, 9),
-(41, 'dr. Talia Maryati, S.Kom', '0812481832', 'bahuwiryapurwanti@pd.co.id', 4, 12),
-(42, 'Kadir Haryanti', '+62-04-798-3835', 'prasetya23@hotmail.com', 3, 30),
-(43, 'Martana Prasetyo', '+62 (804) 019 9970', 'jmardhiyah@gmail.com', 2, 5),
-(44, 'Prabawa Widodo', '(035) 206 4445', 'dadinapitupulu@yahoo.com', 4, 36),
-(45, 'Sutan Viman Hastuti', '+62-083-392-0526', 'gsusanti@cv.gov', 1, 4),
-(46, 'Prasetyo Simbolon', '(0947) 778 8825', 'lwaluyo@yahoo.com', 6, 35),
-(47, 'R. Warsa Farida', '(009) 782-8503', 'clara38@perum.desa.id', 7, 1),
-(48, 'Budi Prasasta', '+62-039-232-8033', 'prabatarihoran@pt.web.id', 1, 16),
-(49, 'Dr. Putri Mayasari, M.Ak', '+62 (120) 411 5181', 'gabriella14@gmail.com', 2, 27),
-(50, 'Paris Safitri', '(001) 078 6532', 'baktiantohariyah@hotmail.com', 4, 31),
-(51, 'Zulfa Rajasa', '+62 (0407) 355-6438', 'karmanhastuti@pt.biz.id', 2, 26),
-(52, 'Yulia Haryanto, S.H.', '+62 (970) 748-3089', 'adiarja46@gmail.com', 1, 11),
-(53, 'Betania Gunawan', '(097) 160 9630', 'harjasa24@pd.or.id', 4, 1),
-(54, 'Cut Tira Usamah, S.I.Kom', '(040) 809-4034', 'hartana82@perum.sch.id', 4, 17),
-(55, 'Cengkal Latupono', '+62 (884) 756-1961', 'putrajumadi@hotmail.com', 7, 30),
-(56, 'Hartana Ramadan', '(0823) 822-0306', 'widiastutiviolet@perum.go.id', 3, 28),
-(57, 'Rachel Utami', '+62-022-182-5994', 'kiandra76@yahoo.com', 6, 36),
-(58, 'Drajat Zulkarnain', '+62-011-716-8793', 'pratamaoni@gmail.com', 6, 32),
-(59, 'Sutan Muhammad Suryono', '(082) 948-4230', 'oman13@hotmail.com', 2, 13),
-(60, 'Nilam Simanjuntak', '(0934) 816-2134', 'padmasarirahayu@cv.go.id', 3, 14),
-(61, 'Ajeng Mulyani, S.Gz', '(067) 809 4797', 'rusmansantoso@gmail.com', 1, 38),
-(62, 'Ir. Dimaz Gunawan', '+62 (298) 622-0925', 'jaisandriani@yahoo.com', 6, 35),
-(63, 'Banara Hardiansyah, S.E.', '+62 (069) 297-2660', 'ami84@pd.gov', 1, 21),
-(64, 'Gandewa Winarsih', '+62 (0040) 669 8390', 'mangunsongmursita@cv.net', 1, 4),
-(65, 'Banawi Hutagalung, S.E.I', '+62 (000) 379-7705', 'imam92@gmail.com', 5, 31),
-(66, 'Zalindra Iswahyudi', '+62-92-797-9992', 'cakrabirawayuniar@gmail.com', 5, 34),
-(67, 'Puti Vanya Mangunsong, S.Sos', '(043) 711 5656', 'gunawannyana@yahoo.com', 2, 4),
-(68, 'Zamira Nainggolan', '+62 (0523) 700-6279', 'irmasudiati@gmail.com', 5, 6),
-(69, 'Oliva Rajasa', '+62 (44) 673 0775', 'soleh58@ud.desa.id', 7, 12),
-(70, 'R. Almira Anggriawan, S.Kom', '+62 (0481) 120 6804', 'maryadi57@hotmail.com', 1, 39),
-(71, 'drg. Jamalia Megantara', '(0561) 007-8960', 'pudjiastutidono@hotmail.com', 1, 16),
-(72, 'H. Sabar Uyainah, M.M.', '+62 (049) 967-2384', 'jaya47@yahoo.com', 4, 8),
-(73, 'Dr. Ozy Hakim, S.Pd', '+62 (0150) 211 1941', 'hamima24@hotmail.com', 5, 16),
-(74, 'drg. Unggul Waluyo, S.H.', '+62 (98) 950-1521', 'caturwinarno@hotmail.com', 5, 39),
-(75, 'Wadi Budiyanto', '087 892 6712', 'karya23@hotmail.com', 1, 40),
-(76, 'Sutan Surya Yuliarti', '(0674) 948 7246', 'umithamrin@gmail.com', 1, 27),
-(77, 'Daru Laksmiwati', '+62 (019) 302-6673', 'tasdik81@perum.go.id', 6, 38),
-(78, 'Tgk. Elma Firgantoro, S.Gz', '+62 (324) 813 5385', 'susantisurya@ud.web.id', 5, 34),
-(79, 'Titin Prasetya', '088 941 7967', 'lsirait@perum.org', 3, 17),
-(80, 'Dr. Maya Ardianto', '(0849) 532-4237', 'zfirgantoro@hotmail.com', 2, 21),
-(81, 'drg. Puti Laksmiwati', '+62-114-233-1648', 'waskitaajeng@yahoo.com', 2, 17),
-(82, 'Sutan Kawaca Pradipta', '(061) 530 3397', 'jnamaga@yahoo.com', 4, 9),
-(83, 'Asmadi Mangunsong', '+62-057-650-5287', 'akarsana47@gmail.com', 6, 20),
-(84, 'Sabrina Pradipta', '0855347500', 'ardiantowisnu@pt.ponpes.id', 4, 21),
-(85, 'Sutan Legawa Wahyuni, M.Kom.', '+62-0522-859-2199', 'oyulianti@pt.id', 7, 5),
-(86, 'dr. Balangga Ramadan, S.I.Kom', '+62 (094) 486 7239', 'darmaji70@hotmail.com', 1, 30),
-(87, 'Himawan Prabowo', '0839844202', 'hardirajasa@gmail.com', 5, 37),
-(88, 'Lukita Saputra', '(0419) 415-4106', 'sabrinanasyiah@yahoo.com', 1, 5),
-(89, 'T. Karsana Yolanda, M.M.', '+62-258-033-6119', 'galarwidodo@hotmail.com', 5, 14),
-(90, 'Simon Mandala', '+62 (95) 306 7789', 'jefrisimanjuntak@yahoo.com', 5, 17),
-(91, 'Rudi Haryanti', '(018) 637 2370', 'gagustina@cv.co.id', 2, 23),
-(92, 'R.A. Melinda Waskita, M.Pd', '+62 (0009) 291 1573', 'bella68@gmail.com', 1, 16),
-(93, 'Rudi Habibi', '+62 (31) 201-6788', 'hidayantojindra@pt.ponpes.id', 3, 19),
-(94, 'Drs. Gara Kusmawati, S.Sos', '+62 (0299) 362-3064', 'irfansetiawan@gmail.com', 2, 29),
-(95, 'Carub Nasyidah', '(039) 727 2117', 'damanikkawaca@pt.org', 7, 35),
-(96, 'Eka Maryati', '+62 (042) 372-4067', 'nabila43@hotmail.com', 6, 20),
-(97, 'Jane Yuliarti, S.T.', '+62-0020-068-6554', 'nmansur@yahoo.com', 5, 34),
-(98, 'Daru Padmasari, S.Pt', '+62 (0230) 788-8040', 'futama@ud.biz.id', 1, 36),
-(99, 'Jamil Yulianti', '0827135027', 'damanikqori@cv.gov', 3, 7),
-(100, 'Harsanto Damanik', '+62 (078) 963 8414', 'rahmawatirafid@pt.ponpes.id', 2, 17);
-
--- --------------------------------------------------------
-
---
--- Table structure for table `user_sustainability_campaign`
---
-
-CREATE TABLE `user_sustainability_campaign` (
-  `campaign_id` int(11) NOT NULL,
-  `user_id` int(11) NOT NULL,
-  `role` varchar(50) DEFAULT NULL,
-  `status` varchar(20) DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `user_sustainability_campaign`
---
-
-INSERT INTO `user_sustainability_campaign` (`campaign_id`, `user_id`, `role`, `status`) VALUES
-(1, 53, 'leader', 'active'),
-(2, 54, 'leader', 'active'),
-(9, 52, 'leader', 'active'),
-(9, 65, 'leader', 'active'),
-(10, 74, 'participant', 'active'),
-(10, 76, 'participant', 'active'),
-(11, 31, 'leader', 'active'),
-(11, 32, 'participant', 'active'),
-(12, 30, 'participant', 'active'),
-(13, 25, 'leader', 'active'),
-(14, 2, 'leader', 'active'),
-(14, 56, 'leader', 'active'),
-(14, 75, 'participant', 'active'),
-(14, 90, 'leader', 'active'),
-(19, 10, 'participant', 'active'),
-(20, 20, 'leader', 'active'),
-(21, 31, 'participant', 'active'),
-(21, 43, 'leader', 'active'),
-(22, 40, 'leader', 'active'),
-(25, 28, 'leader', 'active'),
-(28, 46, 'leader', 'active'),
-(30, 16, 'participant', 'active'),
-(30, 47, 'participant', 'active'),
-(33, 42, 'participant', 'active'),
-(33, 62, 'participant', 'active'),
-(34, 85, 'participant', 'active'),
-(35, 40, 'leader', 'active'),
-(35, 65, 'leader', 'active'),
-(36, 6, 'participant', 'active'),
-(36, 24, 'leader', 'active'),
-(36, 58, 'participant', 'active'),
-(36, 93, 'leader', 'active'),
-(37, 91, 'leader', 'active'),
-(38, 5, 'participant', 'active'),
-(38, 29, 'leader', 'active'),
-(39, 2, 'participant', 'active'),
-(40, 74, 'leader', 'active'),
-(41, 16, 'participant', 'active'),
-(42, 24, 'leader', 'active'),
-(42, 32, 'participant', 'active'),
-(43, 42, 'participant', 'active'),
-(44, 4, 'leader', 'active'),
-(44, 24, 'participant', 'active'),
-(44, 36, 'leader', 'active'),
-(46, 90, 'leader', 'active'),
-(51, 92, 'participant', 'active'),
-(53, 7, 'participant', 'active'),
-(55, 15, 'participant', 'active'),
-(55, 96, 'leader', 'active'),
-(56, 23, 'leader', 'active'),
-(56, 95, 'leader', 'active'),
-(57, 11, 'participant', 'active'),
-(57, 16, 'leader', 'active'),
-(58, 3, 'participant', 'active'),
-(58, 57, 'leader', 'active'),
-(59, 12, 'leader', 'active'),
-(60, 56, 'leader', 'active'),
-(60, 90, 'leader', 'active'),
-(61, 45, 'leader', 'active'),
-(61, 62, 'leader', 'active'),
-(61, 67, 'leader', 'active'),
-(61, 71, 'leader', 'active'),
-(63, 72, 'participant', 'active'),
-(69, 55, 'leader', 'active'),
-(71, 10, 'participant', 'active'),
-(71, 38, 'participant', 'active'),
-(72, 2, 'participant', 'active'),
-(72, 98, 'leader', 'active'),
-(73, 6, 'leader', 'active'),
-(73, 80, 'participant', 'active'),
-(74, 6, 'participant', 'active'),
-(76, 55, 'leader', 'active'),
-(78, 33, 'participant', 'active'),
-(78, 77, 'participant', 'active'),
-(78, 78, 'participant', 'active'),
-(79, 69, 'leader', 'active'),
-(79, 95, 'participant', 'active'),
-(81, 76, 'participant', 'active'),
-(82, 59, 'participant', 'active'),
-(82, 63, 'participant', 'active'),
-(82, 97, 'leader', 'active'),
-(83, 20, 'leader', 'active'),
-(85, 52, 'participant', 'active'),
-(85, 70, 'leader', 'active'),
-(85, 75, 'leader', 'active'),
-(88, 30, 'leader', 'active'),
-(88, 77, 'participant', 'active'),
-(89, 32, 'leader', 'active'),
-(89, 39, 'leader', 'active'),
-(89, 61, 'leader', 'active'),
-(89, 64, 'leader', 'active'),
-(89, 77, 'leader', 'active'),
-(90, 59, 'participant', 'active'),
-(97, 60, 'leader', 'active'),
-(98, 27, 'participant', 'active'),
-(98, 87, 'leader', 'active'),
-(99, 48, 'participant', 'active'),
-(99, 52, 'participant', 'active'),
-(100, 21, 'leader', 'active'),
-(100, 67, 'leader', 'active');
-
---
--- Triggers `user_sustainability_campaign`
---
-DELIMITER $$
-CREATE TRIGGER `trg_prevent_duplicate_campaign_join` BEFORE INSERT ON `user_sustainability_campaign` FOR EACH ROW BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM USER_SUSTAINABILITY_CAMPAIGN
-        WHERE user_id = NEW.user_id AND campaign_id = NEW.campaign_id
-    ) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'User already joined this campaign.';
-    END IF;
-END
-$$
-DELIMITER ;
-
---
--- Indexes for dumped tables
---
-
---
--- Indexes for table `admin`
---
-ALTER TABLE `admin`
-  ADD PRIMARY KEY (`admin_id`);
-
---
--- Indexes for table `byn`
---
-ALTER TABLE `byn`
-  ADD PRIMARY KEY (`byn_id`),
-  ADD KEY `user_id` (`user_id`),
-  ADD KEY `campaign_id` (`campaign_id`);
-
---
--- Indexes for table `byn_location`
---
-ALTER TABLE `byn_location`
-  ADD PRIMARY KEY (`location_id`),
-  ADD KEY `faculty_id` (`faculty_id`),
-  ADD KEY `dept_id` (`dept_id`);
-
---
--- Indexes for table `faculty`
---
-ALTER TABLE `faculty`
-  ADD PRIMARY KEY (`faculty_id`);
-
---
--- Indexes for table `faculty_department`
---
-ALTER TABLE `faculty_department`
-  ADD PRIMARY KEY (`dept_id`),
-  ADD KEY `faculty_id` (`faculty_id`);
-
---
--- Indexes for table `marketing`
---
-ALTER TABLE `marketing`
-  ADD PRIMARY KEY (`marketing_id`),
-  ADD KEY `campaign_id` (`campaign_id`);
-
---
--- Indexes for table `pics`
---
-ALTER TABLE `pics`
-  ADD PRIMARY KEY (`pic_id`),
-  ADD KEY `staff_id` (`staff_id`);
-
---
--- Indexes for table `pic_details`
---
-ALTER TABLE `pic_details`
-  ADD PRIMARY KEY (`pic_detail_id`),
-  ADD KEY `campaign_id` (`campaign_id`),
-  ADD KEY `pic_id` (`pic_id`);
-
---
--- Indexes for table `recyclebin`
---
-ALTER TABLE `recyclebin`
-  ADD PRIMARY KEY (`bin_id`),
-  ADD KEY `location_id` (`location_id`);
-
---
--- Indexes for table `recyclingactivity`
---
-ALTER TABLE `recyclingactivity`
-  ADD PRIMARY KEY (`activity_id`),
-  ADD KEY `campaign_id` (`campaign_id`),
-  ADD KEY `user_id` (`user_id`),
-  ADD KEY `verified_by` (`verified_by`);
-
---
--- Indexes for table `rewardredemption`
---
-ALTER TABLE `rewardredemption`
-  ADD PRIMARY KEY (`redemption_id`),
-  ADD KEY `user_id` (`user_id`),
-  ADD KEY `reward_id` (`reward_id`);
-
---
--- Indexes for table `reward_item`
---
-ALTER TABLE `reward_item`
-  ADD PRIMARY KEY (`reward_id`);
-
---
--- Indexes for table `staff`
---
-ALTER TABLE `staff`
-  ADD PRIMARY KEY (`staff_id`),
-  ADD KEY `dept_id` (`dept_id`),
-  ADD KEY `faculty_id` (`faculty_id`);
-
---
--- Indexes for table `student`
---
-ALTER TABLE `student`
-  ADD PRIMARY KEY (`stud_id`),
-  ADD KEY `faculty_id` (`faculty_id`),
-  ADD KEY `dept_id` (`dept_id`);
-
---
--- Indexes for table `sustainability_campaign`
---
-ALTER TABLE `sustainability_campaign`
-  ADD PRIMARY KEY (`campaign_id`),
-  ADD KEY `created_by` (`created_by`);
-
---
--- Indexes for table `sustainability_coordinator`
---
-ALTER TABLE `sustainability_coordinator`
-  ADD PRIMARY KEY (`staff_id`),
-  ADD KEY `faculty_id` (`faculty_id`),
-  ADD KEY `dept_id` (`dept_id`);
-
---
--- Indexes for table `user_sustainability_campaign`
---
-ALTER TABLE `user_sustainability_campaign`
-  ADD PRIMARY KEY (`campaign_id`,`user_id`),
-  ADD KEY `user_id` (`user_id`);
-
---
--- Constraints for dumped tables
---
-
---
--- Constraints for table `byn`
---
-ALTER TABLE `byn`
-  ADD CONSTRAINT `byn_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `student` (`stud_id`),
-  ADD CONSTRAINT `byn_ibfk_2` FOREIGN KEY (`campaign_id`) REFERENCES `sustainability_campaign` (`campaign_id`);
-
---
--- Constraints for table `byn_location`
---
-ALTER TABLE `byn_location`
-  ADD CONSTRAINT `byn_location_ibfk_1` FOREIGN KEY (`faculty_id`) REFERENCES `faculty` (`faculty_id`),
-  ADD CONSTRAINT `byn_location_ibfk_2` FOREIGN KEY (`dept_id`) REFERENCES `faculty_department` (`dept_id`);
-
---
--- Constraints for table `faculty_department`
---
-ALTER TABLE `faculty_department`
-  ADD CONSTRAINT `faculty_department_ibfk_1` FOREIGN KEY (`faculty_id`) REFERENCES `faculty` (`faculty_id`);
-
---
--- Constraints for table `marketing`
---
-ALTER TABLE `marketing`
-  ADD CONSTRAINT `marketing_ibfk_1` FOREIGN KEY (`campaign_id`) REFERENCES `sustainability_campaign` (`campaign_id`);
-
---
--- Constraints for table `pics`
---
-ALTER TABLE `pics`
-  ADD CONSTRAINT `pics_ibfk_1` FOREIGN KEY (`staff_id`) REFERENCES `staff` (`staff_id`);
-
---
--- Constraints for table `pic_details`
---
-ALTER TABLE `pic_details`
-  ADD CONSTRAINT `pic_details_ibfk_1` FOREIGN KEY (`campaign_id`) REFERENCES `sustainability_campaign` (`campaign_id`),
-  ADD CONSTRAINT `pic_details_ibfk_2` FOREIGN KEY (`pic_id`) REFERENCES `pics` (`pic_id`);
-
---
--- Constraints for table `recyclebin`
---
-ALTER TABLE `recyclebin`
-  ADD CONSTRAINT `recyclebin_ibfk_1` FOREIGN KEY (`location_id`) REFERENCES `byn_location` (`location_id`);
-
---
--- Constraints for table `recyclingactivity`
---
-ALTER TABLE `recyclingactivity`
-  ADD CONSTRAINT `recyclingactivity_ibfk_1` FOREIGN KEY (`campaign_id`) REFERENCES `sustainability_campaign` (`campaign_id`),
-  ADD CONSTRAINT `recyclingactivity_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `student` (`stud_id`),
-  ADD CONSTRAINT `recyclingactivity_ibfk_3` FOREIGN KEY (`verified_by`) REFERENCES `staff` (`staff_id`);
-
---
--- Constraints for table `rewardredemption`
---
-ALTER TABLE `rewardredemption`
-  ADD CONSTRAINT `rewardredemption_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `student` (`stud_id`),
-  ADD CONSTRAINT `rewardredemption_ibfk_2` FOREIGN KEY (`reward_id`) REFERENCES `reward_item` (`reward_id`);
-
---
--- Constraints for table `staff`
---
-ALTER TABLE `staff`
-  ADD CONSTRAINT `staff_ibfk_1` FOREIGN KEY (`dept_id`) REFERENCES `faculty_department` (`dept_id`),
-  ADD CONSTRAINT `staff_ibfk_2` FOREIGN KEY (`faculty_id`) REFERENCES `faculty` (`faculty_id`);
-
---
--- Constraints for table `student`
---
-ALTER TABLE `student`
-  ADD CONSTRAINT `student_ibfk_1` FOREIGN KEY (`faculty_id`) REFERENCES `faculty` (`faculty_id`),
-  ADD CONSTRAINT `student_ibfk_2` FOREIGN KEY (`dept_id`) REFERENCES `faculty_department` (`dept_id`);
-
---
--- Constraints for table `sustainability_campaign`
---
-ALTER TABLE `sustainability_campaign`
-  ADD CONSTRAINT `sustainability_campaign_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `staff` (`staff_id`);
-
---
--- Constraints for table `sustainability_coordinator`
---
-ALTER TABLE `sustainability_coordinator`
-  ADD CONSTRAINT `sustainability_coordinator_ibfk_1` FOREIGN KEY (`staff_id`) REFERENCES `staff` (`staff_id`),
-  ADD CONSTRAINT `sustainability_coordinator_ibfk_2` FOREIGN KEY (`faculty_id`) REFERENCES `faculty` (`faculty_id`),
-  ADD CONSTRAINT `sustainability_coordinator_ibfk_3` FOREIGN KEY (`dept_id`) REFERENCES `faculty_department` (`dept_id`);
-
---
--- Constraints for table `user_sustainability_campaign`
---
-ALTER TABLE `user_sustainability_campaign`
-  ADD CONSTRAINT `user_sustainability_campaign_ibfk_1` FOREIGN KEY (`campaign_id`) REFERENCES `sustainability_campaign` (`campaign_id`),
-  ADD CONSTRAINT `user_sustainability_campaign_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `student` (`stud_id`);
-COMMIT;
-
-/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
-/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
-/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    color_code VARCHAR(20) NOT NULL,
+    status CHAR(8) NOT NULL
+);
+
+CREATE TABLE BIN_LOCATION (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    floor INT NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    status VARCHAR(8),
+    bin_type_id CHAR(12) NOT NULL,
+    faculty_id CHAR(12) NOT NULL,
+    faculty_department_id CHAR(12) NOT NULL,
+    FOREIGN KEY (bin_type_id) REFERENCES BIN_TYPE(id),
+    FOREIGN KEY (faculty_id) REFERENCES FACULTY(id),
+    FOREIGN KEY (faculty_department_id) REFERENCES FACULTY_DEPARTMENT(id)
+);
+
+CREATE TABLE RECYCLING_BIN (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    capacity_kg DECIMAL(5,2) NOT NULL,
+    status VARCHAR(15) NOT NULL,
+    last_emptied DATETIME NOT NULL,
+    qr_code VARCHAR(100) NOT NULL,
+    bin_location_id CHAR(12) NOT NULL,
+    FOREIGN KEY (bin_location_id) REFERENCES BIN_LOCATION(id)
+);
+
+CREATE TABLE STAFF_RECYCLING_BIN (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    assignment_date DATETIME NOT NULL,
+    status VARCHAR(10) NOT NULL,
+    recycling_bin_id CHAR(12) NOT NULL,
+    staff_id CHAR(12) NOT NULL,
+    FOREIGN KEY (recycling_bin_id) REFERENCES RECYCLING_BIN(id),
+    FOREIGN KEY (staff_id) REFERENCES STAFF(id)
+);
+
+CREATE TABLE ADMIN(
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    name VARCHAR(60) NOT NULL,
+    email VARCHAR(60) NOT NULL,
+    address VARCHAR(100) NOT NULL,
+    phone VARCHAR(20) NOT NULL,
+    status CHAR(12) NOT NULL
+);
+
+-- Memindahkan pembuatan tabel WASTE_TYPE sebelum RECYCLING_ACTIVITY
+CREATE TABLE WASTE_TYPE (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    waste_type_name VARCHAR(50) NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    points_per_kg DECIMAL(6,2) NOT NULL,
+    carbon_savings_per_kg DECIMAL(6,2) NOT NULL,
+    status CHAR(8) NOT NULL
+);
+
+CREATE TABLE RECYCLING_ACTIVITY (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    weight_kg DECIMAL(5,2),
+    points_earned INT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    verification_staff CHAR(8) NOT NULL,
+    admin_id CHAR(12) NOT NULL,
+    user_id CHAR(12) NOT NULL,
+    waste_type_id CHAR(12) NOT NULL,
+    recycling_bin_id CHAR(12) NOT NULL,
+    FOREIGN KEY (recycling_bin_id) REFERENCES RECYCLING_BIN(id),
+    FOREIGN KEY (admin_id) REFERENCES ADMIN(id),
+    FOREIGN KEY (user_id) REFERENCES USERR(id),
+    FOREIGN KEY (waste_type_id) REFERENCES WASTE_TYPE(id)
+);
+
+CREATE TABLE POINTS (
+    id INT PRIMARY KEY,
+    description VARCHAR(255) NOT NULL,
+    point INT NOT NULL,
+    when_earn DATETIME NOT NULL,
+    status CHAR(12) NOT NULL,
+    user_id CHAR(12) NOT NULL,
+    recycling_activity_id CHAR(12) NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES USERR(id),
+    FOREIGN KEY (recycling_activity_id) REFERENCES RECYCLING_ACTIVITY(id)
+);
+
+CREATE TABLE REWARD_ITEM (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    name VARCHAR(60) NOT NULL,
+    description VARCHAR(255) NOT NULL,
+    points_required INT NOT NULL,
+    stock INT NOT NULL,
+    status CHAR(12) NOT NULL
+);
+
+CREATE TABLE REWARDREDEMPTION (
+    id CHAR(12) NOT NULL PRIMARY KEY,
+    point_spent INT NOT NULL,
+    redemption_date DATETIME NOT NULL,
+    processed_date DATETIME,
+    status CHAR(9) NOT NULL,
+    user_id CHAR(12) NOT NULL,
+    reward_item_id CHAR(12) NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES USERR(id),
+    FOREIGN KEY (reward_item_id) REFERENCES REWARD_ITEM(id)
+);
+
+-- INSERT FACULTY
+INSERT INTO FACULTY (id, name, code, status) VALUES
+('F001', 'Fakultas Sains dan Analitika Data', 'FSAD', 'active'),
+('F002', 'Fakultas Teknologi Industri dan Rekayasa Sistem', 'FTIRS', 'active'),
+('F003', 'Fakultas Teknik Sipil, Perencanaan, dan Kebumian', 'FTSPK', 'active'),
+('F004', 'Fakultas Teknologi Kelautan', 'FTK', 'active'),
+('F005', 'Fakultas Teknologi Elektro dan Informatika Cerdas', 'FTEIC', 'active'),
+('F006', 'Fakultas Desain Kreatif dan Bisnis Digital', 'FDKBD', 'active'),
+('F007', 'Fakultas Vokasi', 'FV', 'active');
+
+-- INSERT FACULTY_DEPARTMENT
+INSERT INTO FACULTY_DEPARTMENT (id, faculty_id, department_name, status) VALUES
+('FD001', 'F001', 'Fisika', 'active'),
+('FD002', 'F001', 'Kimia', 'active'),
+('FD003', 'F001', 'Biologi', 'active'),
+('FD004', 'F001', 'Matematika', 'active'),
+('FD005', 'F001', 'Statistika', 'active'),
+('FD006', 'F001', 'Aktuaria', 'active'),
+('FD007', 'F002', 'Teknik Mesin', 'active'),
+('FD008', 'F002', 'Teknik Fisika', 'active'),
+('FD009', 'F002', 'Teknik Industri', 'active'),
+('FD010', 'F002', 'Teknik Material dan Metalurgi', 'active'),
+('FD011', 'F002', 'Teknik Kimia', 'active'),
+('FD012', 'F002', 'Teknik Komputer', 'active'),
+('FD013', 'F003', 'Teknik Sipil', 'active'),
+('FD014', 'F003', 'Arsitektur', 'active'),
+('FD015', 'F003', 'Teknik Lingkungan', 'active'),
+('FD016', 'F003', 'Perencanaan Wilayah dan Kota', 'active'),
+('FD017', 'F003', 'Teknik Geomatika', 'active'),
+('FD018', 'F003', 'Teknik Geofisika', 'active'),
+('FD019', 'F004', 'Teknik Perkapalan', 'active'),
+('FD020', 'F004', 'Teknik Sistem Perkapalan', 'active'),
+('FD021', 'F004', 'Teknik Kelautan', 'active'),
+('FD022', 'F004', 'Teknik Transportasi Laut', 'active'),
+('FD023', 'F005', 'Teknik Elektro', 'active'),
+('FD024', 'F005', 'Teknik Biomedik', 'active'),
+('FD025', 'F005', 'Teknik Komputer', 'active'),
+('FD026', 'F005', 'Teknik Informatika', 'active'),
+('FD027', 'F005', 'Sistem Informasi', 'active'),
+('FD028', 'F005', 'Teknologi Informasi', 'active'),
+('FD029', 'F006', 'Manajemen Teknologi', 'active'),
+('FD030', 'F006', 'Desain Produk Industri', 'active'),
+('FD031', 'F006', 'Manajemen Bisnis', 'active'),
+('FD032', 'F006', 'Desain Interior', 'active'),
+('FD033', 'F006', 'Desain Komunikasi Visual', 'active'),
+('FD034', 'F006', 'Studi Pembangunan', 'active'),
+('FD035', 'F007', 'Teknik Infrastruktur Sipil', 'active'),
+('FD036', 'F007', 'Teknik Mesin Industri', 'active'),
+('FD037', 'F007', 'Teknik Elektro Otomasi', 'active'),
+('FD038', 'F007', 'Teknik Kimia Industri', 'active'),
+('FD039', 'F007', 'Teknik Instrumentasi', 'active'),
+('FD040', 'F007', 'Statistika Bisnis', 'active');
+
+-- INSERT USER
+INSERT INTO USERR (id, username, password, fullname, email, phone, registration_date, qrcode, total_points, status, faculty_id, dept_id) VALUES
+('USR0001', 'user1', 'pass1', 'Balidin Dongoran, S.T.', 'user1@its.ac.id', '+62-0321-819-6001', '2023-12-02 21:24:51', 'QR0001', 327, 'active', 'F001', 'FD006'),
+('USR0002', 'user2', 'pass2', 'Johan Suartini', 'user2@its.ac.id', '+62-83-863-7940', '2025-01-25 10:54:05', 'QR0002', 140, 'active', 'F002', 'FD008'),
+('USR0003', 'user3', 'pass3', 'R.M. Nalar Anggraini, S.Psi', 'user3@its.ac.id', '+62(0235)1161559', '2024-01-07 12:43:59', 'QR0003', 377, 'active', 'F006', 'FD034'),
+('USR0004', 'user4', 'pass4', 'Dt. Omar Haryanti, M.Pd', 'user4@its.ac.id', '+62(061)849-5931', '2023-07-21 15:56:07', 'QR0004', 456, 'active', 'F005', 'FD026'),
+('USR0005', 'user5', 'pass5', 'Darsirah Siregar, S.Pt', 'user5@its.ac.id', '+62-0164-752-5534', '2024-12-12 04:35:08', 'QR0005', 16, 'active', 'F001', 'FD002'),
+('USR0006', 'user6', 'pass6', 'Marsudi Hidayanto, M.Ak', 'user6@its.ac.id', '+62(83)276-4835', '2025-03-31 17:36:19', 'QR0006', 119, 'active', 'F005', 'FD024'),
+('USR0007', 'user7', 'pass7', 'KH. Asman Pradana, S.Gz', 'user7@its.ac.id', '+62(641)3953767', '2023-10-05 01:01:35', 'QR0007', 366, 'inactive', 'F002', 'FD010'),
+('USR0008', 'user8', 'pass8', 'Dina Prayoga', 'user8@its.ac.id', '0884969653', '2023-10-01 12:23:51', 'QR0008', 301, 'inactive', 'F007', 'FD035'),
+('USR0009', 'user9', 'pass9', 'drg. Bakijan Hardiansyah', 'user9@its.ac.id', '+62(022)691-6697', '2024-07-31 01:06:47', 'QR0009', 388, 'active', 'F006', 'FD032'),
+('USR0010', 'user10', 'pass10', 'Puspa Anggriawan', 'user10@its.ac.id', '+62(084)514-6270', '2024-12-27 22:28:42', 'QR0010', 174, 'inactive', 'F002', 'FD008'),
+('USR0011', 'user11', 'pass11', 'Hani Mardhiyah, S.E.', 'user11@its.ac.id', '0814893252', '2024-08-08 00:27:38', 'QR0011', 490, 'inactive', 'F001', 'FD001'),
+('USR0012', 'user12', 'pass12', 'Dr. Vega Adriansyah, M.Ak', 'user12@its.ac.id', '+62(701)5430391', '2023-08-21 14:24:10', 'QR0012', 194, 'active', 'F003', 'FD015'),
+('USR0013', 'user13', 'pass13', 'Nova Hidayat, M.Pd', 'user13@its.ac.id', '+62(27)8248963', '2025-06-06 13:54:34', 'QR0013', 309, 'inactive', 'F007', 'FD035'),
+('USR0014', 'user14', 'pass14', 'KH. Omar Pangestu', 'user14@its.ac.id', '+62(0657)871-3315', '2023-07-02 09:48:50', 'QR0014', 373, 'inactive', 'F005', 'FD023'),
+('USR0015', 'user15', 'pass15', 'Drs. Ghaliyati Rahmawati', 'user15@its.ac.id', '+62-0010-310-5183', '2024-01-18 08:53:57', 'QR0015', 498, 'inactive', 'F001', 'FD005'),
+('USR0016', 'user16', 'pass16', 'Jayeng Prabowo, M.Pd', 'user16@its.ac.id', '+62(99)7376311', '2024-11-08 22:02:08', 'QR0016', 150, 'inactive', 'F005', 'FD024'),
+('USR0017', 'user17', 'pass17', 'Kamila Anggraini', 'user17@its.ac.id', '(070)106-5133', '2023-11-10 19:27:28', 'QR0017', 360, 'active', 'F001', 'FD006'),
+('USR0018', 'user18', 'pass18', 'drg. Cahyono Anggraini', 'user18@its.ac.id', '+62(47)317-8108', '2025-03-26 10:23:26', 'QR0018', 116, 'inactive', 'F001', 'FD002'),
+('USR0019', 'user19', 'pass19', 'Bakiman Prakasa', 'user19@its.ac.id', '+62(67)736-0260', '2024-04-14 07:41:45', 'QR0019', 443, 'active', 'F004', 'FD021'),
+('USR0020', 'user20', 'pass20', 'Violet Hasanah', 'user20@its.ac.id', '+62(0687)234-3098', '2023-08-02 10:02:18', 'QR0020', 232, 'inactive', 'F002', 'FD009'),
+('USR0021', 'user21', 'pass21', 'Iriana Hakim, S.Gz', 'user21@its.ac.id', '(0882)081-2191', '2024-11-21 12:34:52', 'QR0021', 181, 'active', 'F006', 'FD031'),
+('USR0022', 'user22', 'pass22', 'R.A. Latika Lazuardi, M.Farm', 'user22@its.ac.id', '+62-0990-916-9985', '2025-06-11 01:53:40', 'QR0022', 359, 'active', 'F005', 'FD028'),
+('USR0023', 'user23', 'pass23', 'Farhunnisa Winarsih', 'user23@its.ac.id', '+62(346)2475107', '2024-10-10 12:57:16', 'QR0023', 87, 'active', 'F002', 'FD010'),
+('USR0024', 'user24', 'pass24', 'Puti Belinda Nasyiah', 'user24@its.ac.id', '+62-842-513-5427', '2025-03-24 15:50:21', 'QR0024', 194, 'inactive', 'F006', 'FD034'),
+('USR0025', 'user25', 'pass25', 'H. Gada Suryatmi', 'user25@its.ac.id', '0808412411', '2025-01-12 17:21:25', 'QR0025', 285, 'active', 'F006', 'FD031'),
+('USR0026', 'user26', 'pass26', 'R.M. Empluk Suryono', 'user26@its.ac.id', '+62-534-874-0164', '2023-07-20 07:32:37', 'QR0026', 431, 'active', 'F002', 'FD007'),
+('USR0027', 'user27', 'pass27', 'Ganda Mustofa', 'user27@its.ac.id', '+62(0278)6801128', '2023-07-14 01:19:12', 'QR0027', 412, 'inactive', 'F004', 'FD021'),
+('USR0028', 'user28', 'pass28', 'dr. Restu Puspasari, S.E.I', 'user28@its.ac.id', '(020)450-5331', '2024-03-16 18:45:16', 'QR0028', 33, 'active', 'F005', 'FD028'),
+('USR0029', 'user29', 'pass29', 'Dr. Tasdik Wasita, M.Ak', 'user29@its.ac.id', '+62(32)2602563', '2024-01-09 07:19:33', 'QR0029', 161, 'active', 'F006', 'FD032'),
+('USR0030', 'user30', 'pass30', 'Pandu Kurniawan', 'user30@its.ac.id', '(007)3375433', '2023-07-04 10:50:38', 'QR0030', 202, 'inactive', 'F002', 'FD009'),
+('USR0031', 'user31', 'pass31', 'Dadi Wacana, S.Psi', 'user31@its.ac.id', '+62(0145)8685014', '2023-11-01 18:27:08', 'QR0031', 71, 'active', 'F006', 'FD033'),
+('USR0032', 'user32', 'pass32', 'Tgk. Ani Kurniawan', 'user32@its.ac.id', '(055)698-1693', '2023-12-30 22:04:43', 'QR0032', 275, 'inactive', 'F006', 'FD033'),
+('USR0033', 'user33', 'pass33', 'Nugraha Fujiati', 'user33@its.ac.id', '+62-88-356-1595', '2024-11-12 08:08:44', 'QR0033', 219, 'inactive', 'F003', 'FD014'),
+('USR0034', 'user34', 'pass34', 'Puti Tantri Salahudin, M.TI.', 'user34@its.ac.id', '+62(0656)482-3662', '2024-10-06 03:44:11', 'QR0034', 70, 'inactive', 'F001', 'FD001'),
+('USR0035', 'user35', 'pass35', 'Tgk. Latika Pudjiastuti', 'user35@its.ac.id', '+62-44-369-9577', '2024-05-24 12:09:46', 'QR0035', 440, 'active', 'F002', 'FD012'),
+('USR0036', 'user36', 'pass36', 'Dariati Melani, M.Kom.', 'user36@its.ac.id', '+62(14)895-1343', '2025-03-03 13:07:44', 'QR0036', 81, 'inactive', 'F005', 'FD023'),
+('USR0037', 'user37', 'pass37', 'Cakrajiya Dongoran', 'user37@its.ac.id', '+62-037-917-6936', '2024-07-04 01:33:55', 'QR0037', 197, 'inactive', 'F005', 'FD026'),
+('USR0038', 'user38', 'pass38', 'Hesti Maulana', 'user38@its.ac.id', '+62-16-328-7083', '2025-05-28 16:35:15', 'QR0038', 270, 'inactive', 'F005', 'FD023'),
+('USR0039', 'user39', 'pass39', 'Puti Mutia Mansur, M.M.', 'user39@its.ac.id', '0889579868', '2024-05-27 10:08:20', 'QR0039', 348, 'active', 'F006', 'FD033'),
+('USR0040', 'user40', 'pass40', 'Paiman Kusmawati', 'user40@its.ac.id', '(0434)8734714', '2023-12-15 04:59:02', 'QR0040', 384, 'inactive', 'F007', 'FD040'),
+('USR0041', 'user41', 'pass41', 'Juli Simanjuntak', 'user41@its.ac.id', '0812236231', '2024-05-03 07:24:18', 'QR0041', 174, 'active', 'F003', 'FD016'),
+('USR0042', 'user42', 'pass42', 'Julia Namaga', 'user42@its.ac.id', '(0603)6690967', '2023-06-20 15:37:04', 'QR0042', 80, 'inactive', 'F001', 'FD006'),
+('USR0043', 'user43', 'pass43', 'Ifa Wibisono', 'user43@its.ac.id', '(088)937-3467', '2023-07-08 14:46:07', 'QR0043', 448, 'inactive', 'F005', 'FD024'),
+('USR0044', 'user44', 'pass44', 'Jessica Winarsih', 'user44@its.ac.id', '(027)2980699', '2024-11-12 00:55:05', 'QR0044', 259, 'active', 'F007', 'FD040'),
+('USR0045', 'user45', 'pass45', 'Bakda Yuniar', 'user45@its.ac.id', '(027)204-6537', '2024-02-24 22:33:15', 'QR0045', 152, 'active', 'F002', 'FD009'),
+('USR0046', 'user46', 'pass46', 'Vanya Wibowo', 'user46@its.ac.id', '+62(0641)7080531', '2025-02-11 20:56:47', 'QR0046', 390, 'active', 'F005', 'FD027'),
+('USR0047', 'user47', 'pass47', 'Arta Dabukke, S.H.', 'user47@its.ac.id', '+62-092-327-1937', '2024-12-10 08:40:44', 'QR0047', 470, 'active', 'F005', 'FD025'),
+('USR0048', 'user48', 'pass48', 'Vivi Uwais', 'user48@its.ac.id', '+62(99)124-1904', '2024-09-05 07:20:09', 'QR0048', 250, 'active', 'F001', 'FD003'),
+('USR0049', 'user49', 'pass49', 'Umaya Waluyo, S.Sos', 'user49@its.ac.id', '+62-193-149-1905', '2024-08-02 20:47:53', 'QR0049', 449, 'inactive', 'F002', 'FD007'),
+('USR0050', 'user50', 'pass50', 'Salimah Uwais', 'user50@its.ac.id', '+62(085)0671657', '2024-12-16 10:53:44', 'QR0050', 123, 'active', 'F001', 'FD006'),
+('USR0051', 'user51', 'pass51', 'Ibrahim Nugroho', 'user51@its.ac.id', '0849877694', '2024-02-21 09:53:59', 'QR0051', 248, 'active', 'F007', 'FD039'),
+('USR0052', 'user52', 'pass52', 'R.A. Yance Irawan, S.T.', 'user52@its.ac.id', '(0379)9650752', '2024-06-28 18:17:47', 'QR0052', 392, 'active', 'F002', 'FD012'),
+('USR0053', 'user53', 'pass53', 'Garang Rajata', 'user53@its.ac.id', '+62(494)8083136', '2024-06-29 13:27:29', 'QR0053', 243, 'active', 'F003', 'FD017'),
+('USR0054', 'user54', 'pass54', 'KH. Dimas Kusmawati', 'user54@its.ac.id', '(0701)436-3495', '2024-06-17 15:55:18', 'QR0054', 446, 'inactive', 'F002', 'FD011'),
+('USR0055', 'user55', 'pass55', 'Dr. Gangsar Anggraini', 'user55@its.ac.id', '0855744431', '2024-12-27 07:25:17', 'QR0055', 386, 'active', 'F006', 'FD031'),
+('USR0056', 'user56', 'pass56', 'Galih Lazuardi', 'user56@its.ac.id', '0823374989', '2024-01-21 21:11:06', 'QR0056', 204, 'inactive', 'F004', 'FD022'),
+('USR0057', 'user57', 'pass57', 'Rafi Nababan', 'user57@its.ac.id', '+62(0352)408-2400', '2024-08-18 21:03:56', 'QR0057', 61, 'active', 'F002', 'FD007'),
+('USR0058', 'user58', 'pass58', 'Tami Mahendra', 'user58@its.ac.id', '(0109)477-7520', '2023-12-29 04:14:42', 'QR0058', 173, 'active', 'F005', 'FD027'),
+('USR0059', 'user59', 'pass59', 'Dr. Calista Haryanto, S.Sos', 'user59@its.ac.id', '(0190)229-4131', '2024-08-22 12:56:32', 'QR0059', 117, 'active', 'F001', 'FD001'),
+('USR0060', 'user60', 'pass60', 'dr. Luluh Riyanti, M.Ak', 'user60@its.ac.id', '+62-0867-749-6499', '2023-08-01 20:28:52', 'QR0060', 362, 'active', 'F002', 'FD007'),
+('USR0061', 'user61', 'pass61', 'Puti Vanesa Pranowo', 'user61@its.ac.id', '+62-412-328-1206', '2024-05-30 23:42:16', 'QR0061', 463, 'active', 'F007', 'FD037'),
+('USR0062', 'user62', 'pass62', 'Rina Halimah, S.Pd', 'user62@its.ac.id', '+62-034-471-3493', '2024-05-11 06:52:18', 'QR0062', 36, 'active', 'F003', 'FD018'),
+('USR0063', 'user63', 'pass63', 'Kenari Prasetyo', 'user63@its.ac.id', '+62(42)1024994', '2024-05-22 04:07:14', 'QR0063', 248, 'active', 'F005', 'FD024'),
+('USR0064', 'user64', 'pass64', 'Jarwa Sihombing', 'user64@its.ac.id', '(048)8771906', '2025-01-06 14:24:42', 'QR0064', 370, 'inactive', 'F002', 'FD010'),
+('USR0065', 'user65', 'pass65', 'Rahmi Ramadan', 'user65@its.ac.id', '+62-13-990-4902', '2024-06-15 12:28:40', 'QR0065', 413, 'inactive', 'F002', 'FD007'),
+('USR0066', 'user66', 'pass66', 'Ir. Ilyas Setiawan', 'user66@its.ac.id', '+62(96)717-5655', '2024-11-17 13:54:03', 'QR0066', 49, 'inactive', 'F003', 'FD016'),
+('USR0067', 'user67', 'pass67', 'Sidiq Marpaung', 'user67@its.ac.id', '+62(674)6807154', '2024-02-22 03:58:01', 'QR0067', 210, 'inactive', 'F007', 'FD040'),
+('USR0068', 'user68', 'pass68', 'Prasetyo Waskita', 'user68@its.ac.id', '0808760385', '2024-10-11 16:26:36', 'QR0068', 27, 'active', 'F001', 'FD004'),
+('USR0069', 'user69', 'pass69', 'drg. Luis Handayani, S.Gz', 'user69@its.ac.id', '+62-482-477-1093', '2024-12-18 09:01:04', 'QR0069', 372, 'inactive', 'F007', 'FD035'),
+('USR0070', 'user70', 'pass70', 'Galang Puspasari', 'user70@its.ac.id', '+62-86-131-7127', '2025-06-09 11:37:12', 'QR0070', 127, 'active', 'F002', 'FD011'),
+('USR0071', 'user71', 'pass71', 'Icha Melani, S.T.', 'user71@its.ac.id', '(077)378-2639', '2024-07-14 20:00:13', 'QR0071', 229, 'active', 'F004', 'FD020'),
+('USR0072', 'user72', 'pass72', 'Diana Hidayat, S.T.', 'user72@its.ac.id', '(058)404-4997', '2025-04-18 03:20:00', 'QR0072', 142, 'inactive', 'F002', 'FD007'),
+('USR0073', 'user73', 'pass73', 'Ivan Nasyiah', 'user73@its.ac.id', '(0558)867-5339', '2024-04-08 12:48:03', 'QR0073', 226, 'active', 'F001', 'FD006'),
+('USR0074', 'user74', 'pass74', 'Sabri Zulkarnain', 'user74@its.ac.id', '+62-057-662-7028', '2024-09-16 11:28:03', 'QR0074', 276, 'active', 'F001', 'FD002'),
+('USR0075', 'user75', 'pass75', 'Cinthia Farida', 'user75@its.ac.id', '+62(087)026-2174', '2024-03-05 00:56:44', 'QR0075', 85, 'inactive', 'F004', 'FD022'),
+('USR0076', 'user76', 'pass76', 'drg. Sadina Hutapea', 'user76@its.ac.id', '+62(865)7809134', '2023-12-09 18:21:30', 'QR0076', 109, 'inactive', 'F001', 'FD002'),
+('USR0077', 'user77', 'pass77', 'Cornelia Fujiati, S.IP', 'user77@its.ac.id', '+62(072)400-5045', '2024-04-02 05:15:04', 'QR0077', 194, 'active', 'F004', 'FD021'),
+('USR0078', 'user78', 'pass78', 'Dalima Prasasta', 'user78@its.ac.id', '0869222196', '2024-10-09 09:56:43', 'QR0078', 474, 'inactive', 'F003', 'FD016'),
+('USR0079', 'user79', 'pass79', 'Dimas Mandasari, M.Farm', 'user79@its.ac.id', '+62(37)4740748', '2023-10-16 18:35:09', 'QR0079', 356, 'inactive', 'F002', 'FD008'),
+('USR0080', 'user80', 'pass80', 'Ilyas Situmorang', 'user80@its.ac.id', '+62(0647)436-7136', '2024-09-02 07:07:07', 'QR0080', 151, 'active', 'F001', 'FD005'),
+('USR0081', 'user81', 'pass81', 'Ratih Sihombing', 'user81@its.ac.id', '+62(0064)090-9743', '2024-09-29 14:13:07', 'QR0081', 376, 'active', 'F006', 'FD031'),
+('USR0082', 'user82', 'pass82', 'Tgk. Darmaji Usada, S.Kom', 'user82@its.ac.id', '+62(0210)4709521', '2025-05-22 14:23:54', 'QR0082', 29, 'active', 'F005', 'FD026'),
+('USR0083', 'user83', 'pass83', 'Jane Agustina', 'user83@its.ac.id', '+62(32)858-8424', '2025-05-26 00:48:51', 'QR0083', 257, 'active', 'F001', 'FD005'),
+('USR0084', 'user84', 'pass84', 'Dr. Yani Sihombing, S.Psi', 'user84@its.ac.id', '+62(071)236-8516', '2023-06-26 21:10:10', 'QR0084', 41, 'active', 'F001', 'FD005'),
+('USR0085', 'user85', 'pass85', 'Paulin Maheswara', 'user85@its.ac.id', '(0549)6513709', '2025-05-02 21:02:20', 'QR0085', 34, 'active', 'F004', 'FD019'),
+('USR0086', 'user86', 'pass86', 'Tgk. Vinsen Suryatmi', 'user86@its.ac.id', '+62-0174-612-0047', '2023-09-14 06:20:58', 'QR0086', 482, 'active', 'F005', 'FD027'),
+('USR0087', 'user87', 'pass87', 'Daryani Nasyiah', 'user87@its.ac.id', '+62(67)5869261', '2025-03-24 14:52:20', 'QR0087', 20, 'active', 'F004', 'FD021'),
+('USR0088', 'user88', 'pass88', 'Raisa Wasita', 'user88@its.ac.id', '+62(0053)7735158', '2025-05-16 10:32:33', 'QR0088', 478, 'inactive', 'F002', 'FD012'),
+('USR0089', 'user89', 'pass89', 'Gatot Halim, S.Sos', 'user89@its.ac.id', '+62(0317)1390053', '2023-09-21 21:05:53', 'QR0089', 366, 'inactive', 'F002', 'FD009'),
+('USR0090', 'user90', 'pass90', 'Drs. Danang Hidayat, M.Pd', 'user90@its.ac.id', '+62-933-529-0422', '2024-08-08 16:03:10', 'QR0090', 202, 'active', 'F006', 'FD034'),
+('USR0091', 'user91', 'pass91', 'Wirda Natsir', 'user91@its.ac.id', '+62(002)053-9502', '2024-01-08 04:30:57', 'QR0091', 153, 'inactive', 'F003', 'FD013'),
+('USR0092', 'user92', 'pass92', 'Budi Andriani', 'user92@its.ac.id', '0811775891', '2024-06-01 03:41:55', 'QR0092', 4, 'inactive', 'F005', 'FD027'),
+('USR0093', 'user93', 'pass93', 'Sutan Warsita Susanti', 'user93@its.ac.id', '+62-084-700-7661', '2024-06-30 20:58:50', 'QR0093', 51, 'active', 'F005', 'FD024'),
+('USR0094', 'user94', 'pass94', 'Maimunah Hidayanto, S.Pt', 'user94@its.ac.id', '+62(921)2499856', '2024-09-22 01:53:53', 'QR0094', 259, 'inactive', 'F002', 'FD009'),
+('USR0095', 'user95', 'pass95', 'T. Jaeman Mayasari', 'user95@its.ac.id', '(011)836-7365', '2025-03-19 17:55:09', 'QR0095', 451, 'active', 'F002', 'FD009'),
+('USR0096', 'user96', 'pass96', 'Lalita Agustina', 'user96@its.ac.id', '+62(056)545-2711', '2025-03-23 03:03:31', 'QR0096', 145, 'active', 'F004', 'FD021'),
+('USR0097', 'user97', 'pass97', 'Bakiman Astuti', 'user97@its.ac.id', '+62(052)809-8851', '2024-04-30 03:44:05', 'QR0097', 313, 'active', 'F006', 'FD033'),
+('USR0098', 'user98', 'pass98', 'Salwa Anggraini', 'user98@its.ac.id', '+62-049-451-9832', '2024-11-07 04:09:32', 'QR0098', 153, 'active', 'F002', 'FD009'),
+('USR0099', 'user99', 'pass99', 'Genta Kurniawan', 'user99@its.ac.id', '+62(851)493-6899', '2024-11-21 08:11:05', 'QR0099', 59, 'active', 'F006', 'FD033'),
+('USR0100', 'user100', 'pass100', 'Kalim Dongoran, M.Ak', 'user100@its.ac.id', '+62(0024)4550229', '2024-11-07 15:29:56', 'QR0100', 79, 'inactive', 'F003', 'FD017');
+
+-- INSERT STAFF
+INSERT INTO STAFF (id, username, password, faculty, department, address, phone, email, faculty_department_id, faculty_id) VALUES
+('STF00000001', 'staff1', 'pass1', 'F006', 'FD031', 'Jl. Dipatiukur No. 8, Metro, SR 52545', '+62(002)2901476', 'staff1@its.ac.id', 'FD031', 'F006'),
+('STF00000002', 'staff2', 'pass2', 'F002', 'FD012', 'Gang Lembong No. 1, Palangkaraya, JA 97840', '+62-0690-034-3244', 'staff2@its.ac.id', 'FD012', 'F002'),
+('STF00000003', 'staff3', 'pass3', 'F006', 'FD031', 'Gg. Bangka Raya No. 268, Pekalongan, NT 60607', '+62(059)6966416', 'staff3@its.ac.id', 'FD031', 'F006'),
+('STF00000004', 'staff4', 'pass4', 'F005', 'FD026', 'Gg. Siliwangi No. 613, Semarang, Riau 64535', '+62(18)188-3552', 'staff4@its.ac.id', 'FD026', 'F005'),
+('STF00000005', 'staff5', 'pass5', 'F003', 'FD013', 'Gg. Kiaracondong No. 921, Yogyakarta, Sumatera Barat 99799', '+62(527)1774490', 'staff5@its.ac.id', 'FD013', 'F003'),
+('STF00000006', 'staff6', 'pass6', 'F001', 'FD006', 'Gang Cihampelas No. 054, Sukabumi, JK 79807', '+62-597-820-7151', 'staff6@its.ac.id', 'FD006', 'F001'),
+('STF00000007', 'staff7', 'pass7', 'F004', 'FD021', 'Gg. Cempaka No. 8, Mataram, Papua 66590', '+62(151)8644925', 'staff7@its.ac.id', 'FD021', 'F004'),
+('STF00000008', 'staff8', 'pass8', 'F001', 'FD001', 'Gang Suryakencana No. 6, Serang, DKI Jakarta 86528', '+62(068)5054235', 'staff8@its.ac.id', 'FD001', 'F001'),
+('STF00000009', 'staff9', 'pass9', 'F003', 'FD014', 'Jl. Jakarta No. 418, Surabaya, NB 96222', '+62(70)653-7947', 'staff9@its.ac.id', 'FD014', 'F003'),
+('STF00000010', 'staff10', 'pass10', 'F006', 'FD031', 'Gang Kebonjati No. 97, Yogyakarta, Lampung 88623', '+62(40)7581814', 'staff10@its.ac.id', 'FD031', 'F006'),
+('STF00000011', 'staff11', 'pass11', 'F002', 'FD012', 'Gang Monginsidi No. 613, Malang, Bali 06853', '(015)3051522', 'staff11@its.ac.id', 'FD012', 'F002'),
+('STF00000012', 'staff12', 'pass12', 'F004', 'FD022', 'Jalan Waringin No. 90, Banda Aceh, Kepulauan Bangka Belitung 28986', '+62(043)410-3697', 'staff12@its.ac.id', 'FD022', 'F004'),
+('STF00000013', 'staff13', 'pass13', 'F005', 'FD023', 'Jalan Medokan Ayu No. 9, Tasikmalaya, Jawa Tengah 60953', '(021)851-8888', 'staff13@its.ac.id', 'FD023', 'F005'),
+('STF00000014', 'staff14', 'pass14', 'F001', 'FD001', 'Jalan KH Amin Jasuta No. 54, Manado, DI Yogyakarta 31952', '+62-058-527-7221', 'staff14@its.ac.id', 'FD001', 'F001'),
+('STF00000015', 'staff15', 'pass15', 'F006', 'FD030', 'Jalan Cihampelas No. 054, Probolinggo, SU 03450', '+62(415)6676527', 'staff15@its.ac.id', 'FD030', 'F006'),
+('STF00000016', 'staff16', 'pass16', 'F005', 'FD023', 'Jalan W.R. Supratman No. 692, Madiun, GO 54479', '(027)570-5964', 'staff16@its.ac.id', 'FD023', 'F005'),
+('STF00000017', 'staff17', 'pass17', 'F007', 'FD037', 'Gang Monginsidi No. 2, Bontang, Sulawesi Tengah 21355', '(090)9275571', 'staff17@its.ac.id', 'FD037', 'F007'),
+('STF00000018', 'staff18', 'pass18', 'F005', 'FD027', 'Gang Suryakencana No. 31, Ternate, Kalimantan Barat 86814', '+62(0739)4731217', 'staff18@its.ac.id', 'FD027', 'F005'),
+('STF00000019', 'staff19', 'pass19', 'F002', 'FD010', 'Gg. Otto Iskandardinata No. 18, Langsa, Jawa Timur 58313', '+62(37)0589578', 'staff19@its.ac.id', 'FD010', 'F002'),
+('STF00000020', 'staff20', 'pass20', 'F002', 'FD007', 'Gg. Suniaraja No. 7, Yogyakarta, Sulawesi Barat 25177', '0852892268', 'staff20@its.ac.id', 'FD007', 'F002'),
+('STF00000021', 'staff21', 'pass21', 'F003', 'FD015', 'Gg. Jend. A. Yani No. 535, Bau-Bau, Kepulauan Bangka Belitung 84249', '0818299229', 'staff21@its.ac.id', 'FD015', 'F003'),
+('STF00000022', 'staff22', 'pass22', 'F007', 'FD035', 'Jl. Cihampelas No. 9, Sungai Penuh, KT 90784', '+62(0736)471-0276', 'staff22@its.ac.id', 'FD035', 'F007'),
+('STF00000023', 'staff23', 'pass23', 'F003', 'FD014', 'Gg. Rungkut Industri No. 555, Blitar, PA 53714', '(0321)0469632', 'staff23@its.ac.id', 'FD014', 'F003'),
+('STF00000024', 'staff24', 'pass24', 'F006', 'FD030', 'Jl. Yos Sudarso No. 7, Lhokseumawe, SB 16873', '+62-950-047-9748', 'staff24@its.ac.id', 'FD030', 'F006'),
+('STF00000025', 'staff25', 'pass25', 'F006', 'FD029', 'Jalan Pasirkoja No. 5, Mataram, Banten 09835', '0841687849', 'staff25@its.ac.id', 'FD029', 'F006'),
+('STF00000026', 'staff26', 'pass26', 'F003', 'FD017', 'Gg. Soekarno Hatta No. 85, Dumai, Sumatera Selatan 80002', '+62(787)2982595', 'staff26@its.ac.id', 'FD017', 'F003'),
+('STF00000027', 'staff27', 'pass27', 'F007', 'FD038', 'Gang S. Parman No. 8, Tarakan, Maluku 05516', '+62(0097)499-3097', 'staff27@its.ac.id', 'FD038', 'F007'),
+('STF00000028', 'staff28', 'pass28', 'F005', 'FD028', 'Jl. BKR No. 1, Banda Aceh, Sulawesi Tengah 62636', '0897028385', 'staff28@its.ac.id', 'FD028', 'F005'),
+('STF00000029', 'staff29', 'pass29', 'F002', 'FD008', 'Jalan Erlangga No. 5, Tangerang, BB 33484', '+62-0443-757-5844', 'staff29@its.ac.id', 'FD008', 'F002'),
+('STF00000030', 'staff30', 'pass30', 'F007', 'FD036', 'Gang Ir. H. Djuanda No. 04, Malang, Sulawesi Tengah 73384', '0842199330', 'staff30@its.ac.id', 'FD036', 'F007'),
+('STF00000031', 'staff31', 'pass31', 'F007', 'FD036', 'Jl. Tubagus Ismail No. 71, Ambon, Jawa Timur 77345', '+62(0019)380-2620', 'staff31@its.ac.id', 'FD036', 'F007'),
+('STF00000032', 'staff32', 'pass32', 'F004', 'FD019', 'Gg. BKR No. 499, Magelang, LA 88728', '(0431)5274205', 'staff32@its.ac.id', 'FD019', 'F004'),
+('STF00000033', 'staff33', 'pass33', 'F002', 'FD012', 'Gg. W.R. Supratman No. 5, Padang, GO 27530', '+62(0637)4549904', 'staff33@its.ac.id', 'FD012', 'F002'),
+('STF00000034', 'staff34', 'pass34', 'F003', 'FD016', 'Jl. Rawamangun No. 26, Tanjungbalai, JA 59332', '(0279)568-7833', 'staff34@its.ac.id', 'FD016', 'F003'),
+('STF00000035', 'staff35', 'pass35', 'F007', 'FD040', 'Jalan Ahmad Yani No. 088, Samarinda, Jawa Tengah 58713', '(0187)072-8679', 'staff35@its.ac.id', 'FD040', 'F007'),
+('STF00000036', 'staff36', 'pass36', 'F007', 'FD040', 'Jalan Suniaraja No. 03, Banjar, Sulawesi Selatan 18017', '+62-046-226-5676', 'staff36@its.ac.id', 'FD040', 'F007'),
+('STF00000037', 'staff37', 'pass37', 'F007', 'FD036', 'Gg. Gedebage Selatan No. 868, Tegal, KI 04786', '0863375243', 'staff37@its.ac.id', 'FD036', 'F007'),
+('STF00000038', 'staff38', 'pass38', 'F003', 'FD014', 'Jalan Moch. Toha No. 119, Palopo, Bengkulu 06738', '+62-028-439-5995', 'staff38@its.ac.id', 'FD014', 'F003'),
+('STF00000039', 'staff39', 'pass39', 'F007', 'FD040', 'Jl. Tubagus Ismail No. 40, Sorong, Sulawesi Selatan 05685', '(062)462-8733', 'staff39@its.ac.id', 'FD040', 'F007'),
+('STF00000040', 'staff40', 'pass40', 'F001', 'FD004', 'Jalan Stasiun Wonokromo No. 68, Meulaboh, KU 35175', '+62(083)0469901', 'staff40@its.ac.id', 'FD004', 'F001'),
+('STF00000041', 'staff41', 'pass41', 'F007', 'FD035', 'Jalan Rumah Sakit No. 03, Ternate, Jambi 39363', '0854678544', 'staff41@its.ac.id', 'FD035', 'F007'),
+('STF00000042', 'staff42', 'pass42', 'F007', 'FD038', 'Jalan Waringin No. 35, Padang Sidempuan, BT 20489', '(042)353-6937', 'staff42@its.ac.id', 'FD038', 'F007'),
+('STF00000043', 'staff43', 'pass43', 'F002', 'FD008', 'Gang Erlangga No. 522, Denpasar, BE 10062', '+62-0120-387-5099', 'staff43@its.ac.id', 'FD008', 'F002'),
+('STF00000044', 'staff44', 'pass44', 'F007', 'FD038', 'Jl. Jayawijaya No. 6, Banda Aceh, SU 84086', '+62(11)823-3984', 'staff44@its.ac.id', 'FD038', 'F007'),
+('STF00000045', 'staff45', 'pass45', 'F003', 'FD015', 'Jalan Soekarno Hatta No. 79, Tanjungpinang, KI 10166', '(087)0021765', 'staff45@its.ac.id', 'FD015', 'F003'),
+('STF00000046', 'staff46', 'pass46', 'F007', 'FD036', 'Jl. Ahmad Yani No. 40, Tangerang Selatan, Kepulauan Riau 25039', '+62(61)4293968', 'staff46@its.ac.id', 'FD036', 'F007'),
+('STF00000047', 'staff47', 'pass47', 'F002', 'FD007', 'Jl. S. Parman No. 5, Bengkulu, SN 15999', '(050)4773586', 'staff47@its.ac.id', 'FD007', 'F002'),
+('STF00000048', 'staff48', 'pass48', 'F006', 'FD030', 'Jalan Wonoayu No. 31, Kota Administrasi Jakarta Timur, JT 26551', '+62(004)7541212', 'staff48@its.ac.id', 'FD030', 'F006'),
+('STF00000049', 'staff49', 'pass49', 'F004', 'FD021', 'Jalan Astana Anyar No. 581, Meulaboh, AC 66183', '0826224447', 'staff49@its.ac.id', 'FD021', 'F004'),
+('STF00000050', 'staff50', 'pass50', 'F003', 'FD013', 'Gg. Pelajar Pejuang No. 47, Mataram, Kepulauan Bangka Belitung 79937', '+62(024)065-9657', 'staff50@its.ac.id', 'FD013', 'F003'),
+('STF00000051', 'staff51', 'pass51', 'F007', 'FD037', 'Gg. Raya Ujungberung No. 3, Lubuklinggau, KB 54793', '+62(646)5193982', 'staff51@its.ac.id', 'FD037', 'F007'),
+('STF00000052', 'staff52', 'pass52', 'F003', 'FD018', 'Gg. PHH. Mustofa No. 1, Tangerang, Sumatera Barat 43426', '(017)9796886', 'staff52@its.ac.id', 'FD018', 'F003'),
+('STF00000053', 'staff53', 'pass53', 'F005', 'FD026', 'Jl. Pacuan Kuda No. 5, Sukabumi, Banten 56101', '+62(0388)8993756', 'staff53@its.ac.id', 'FD026', 'F005'),
+('STF00000054', 'staff54', 'pass54', 'F006', 'FD033', 'Jalan Ronggowarsito No. 461, Tegal, JT 45738', '(0571)775-1401', 'staff54@its.ac.id', 'FD033', 'F006'),
+('STF00000055', 'staff55', 'pass55', 'F003', 'FD013', 'Jl. Pacuan Kuda No. 2, Magelang, Sulawesi Selatan 36226', '(009)3796603', 'staff55@its.ac.id', 'FD013', 'F003'),
+('STF00000056', 'staff56', 'pass56', 'F001', 'FD003', 'Jl. Jayawijaya No. 553, Binjai, Kepulauan Bangka Belitung 85969', '(091)5579249', 'staff56@its.ac.id', 'FD003', 'F001'),
+('STF00000057', 'staff57', 'pass57', 'F002', 'FD011', 'Jalan Moch. Toha No. 12, Tanjungbalai, Jawa Tengah 69296', '(027)828-2742', 'staff57@its.ac.id', 'FD011', 'F002'),
+('STF00000058', 'staff58', 'pass58', 'F003', 'FD013', 'Jalan Setiabudhi No. 723, Sabang, Sumatera Selatan 67677', '+62(19)034-0438', 'staff58@its.ac.id', 'FD013', 'F003'),
+('STF00000059', 'staff59', 'pass59', 'F001', 'FD005', 'Gang M.H Thamrin No. 1, Kota Administrasi Jakarta Timur, PA 78361', '+62-0407-451-7133', 'staff59@its.ac.id', 'FD005', 'F001'),
+('STF00000060', 'staff60', 'pass60', 'F004', 'FD021', 'Jl. Laswi No. 095, Serang, JI 44948', '+62(026)042-2325', 'staff60@its.ac.id', 'FD021', 'F004'),
+('STF00000061', 'staff61', 'pass61', 'F006', 'FD031', 'Jalan Joyoboyo No. 4, Metro, Sulawesi Tengah 16845', '(0759)0175186', 'staff61@its.ac.id', 'FD031', 'F006'),
+('STF00000062', 'staff62', 'pass62', 'F004', 'FD019', 'Gg. Pasteur No. 45, Salatiga, Sumatera Barat 00170', '+62(027)706-3242', 'staff62@its.ac.id', 'FD019', 'F004'),
+('STF00000063', 'staff63', 'pass63', 'F004', 'FD020', 'Gang Ciwastra No. 20, Sorong, MA 61103', '(0129)387-0051', 'staff63@its.ac.id', 'FD020', 'F004'),
+('STF00000064', 'staff64', 'pass64', 'F003', 'FD013', 'Jalan Moch. Ramdan No. 11, Lubuklinggau, PA 26221', '0890927532', 'staff64@its.ac.id', 'FD013', 'F003'),
+('STF00000065', 'staff65', 'pass65', 'F006', 'FD032', 'Jl. Dipenogoro No. 196, Pagaralam, MU 34138', '+62(0043)898-3640', 'staff65@its.ac.id', 'FD032', 'F006'),
+('STF00000066', 'staff66', 'pass66', 'F001', 'FD005', 'Jalan Moch. Toha No. 91, Mataram, Maluku Utara 69658', '+62(71)091-0430', 'staff66@its.ac.id', 'FD005', 'F001'),
+('STF00000067', 'staff67', 'pass67', 'F007', 'FD039', 'Gang W.R. Supratman No. 6, Subulussalam, Jawa Tengah 14183', '+62(85)6914630', 'staff67@its.ac.id', 'FD039', 'F007'),
+('STF00000068', 'staff68', 'pass68', 'F006', 'FD034', 'Jalan Erlangga No. 9, Lhokseumawe, Kalimantan Barat 02027', '+62(884)252-4105', 'staff68@its.ac.id', 'FD034', 'F006'),
+('STF00000069', 'staff69', 'pass69', 'F006', 'FD034', 'Gg. Joyoboyo No. 1, Palu, SS 07925', '+62(41)913-8000', 'staff69@its.ac.id', 'FD034', 'F006'),
+('STF00000070', 'staff70', 'pass70', 'F006', 'FD030', 'Gang Sukajadi No. 208, Jayapura, Maluku Utara 65419', '+62(180)238-0617', 'staff70@its.ac.id', 'FD030', 'F006'),
+('STF00000071', 'staff71', 'pass71', 'F003', 'FD016', 'Jalan M.H Thamrin No. 05, Kupang, MA 75973', '0832060385', 'staff71@its.ac.id', 'FD016', 'F003'),
+('STF00000072', 'staff72', 'pass72', 'F001', 'FD006', 'Gg. Rajawali Timur No. 383, Pasuruan, Bengkulu 41038', '(057)191-8261', 'staff72@its.ac.id', 'FD006', 'F001'),
+('STF00000073', 'staff73', 'pass73', 'F003', 'FD017', 'Jl. PHH. Mustofa No. 56, Lubuklinggau, Sulawesi Tengah 31329', '+62(021)277-5618', 'staff73@its.ac.id', 'FD017', 'F003'),
+('STF00000074', 'staff74', 'pass74', 'F003', 'FD018', 'Gang Rawamangun No. 11, Tangerang Selatan, MA 35213', '+62(680)442-0678', 'staff74@its.ac.id', 'FD018', 'F003'),
+('STF00000075', 'staff75', 'pass75', 'F007', 'FD035', 'Jalan HOS. Cokroaminoto No. 003, Dumai, Riau 19941', '+62-13-721-5107', 'staff75@its.ac.id', 'FD035', 'F007'),
+('STF00000076', 'staff76', 'pass76', 'F006', 'FD031', 'Gang Yos Sudarso No. 662, Jambi, Kalimantan Barat 47209', '+62-0476-870-1462', 'staff76@its.ac.id', 'FD031', 'F006'),
+('STF00000077', 'staff77', 'pass77', 'F005', 'FD025', 'Jl. Sukabumi No. 5, Probolinggo, SB 98564', '+62(05)930-4078', 'staff77@its.ac.id', 'FD025', 'F005'),
+('STF00000078', 'staff78', 'pass78', 'F006', 'FD032', 'Jl. Pacuan Kuda No. 3, Prabumulih, BE 96522', '+62-0955-905-9929', 'staff78@its.ac.id', 'FD032', 'F006'),
+('STF00000079', 'staff79', 'pass79', 'F003', 'FD016', 'Jalan Rajiman No. 103, Banda Aceh, Sumatera Utara 05932', '+62(250)0292185', 'staff79@its.ac.id', 'FD016', 'F003'),
+('STF00000080', 'staff80', 'pass80', 'F006', 'FD031', 'Jalan Sadang Serang No. 52, Tegal, Sulawesi Selatan 52895', '+62-0926-442-2096', 'staff80@its.ac.id', 'FD031', 'F006'),
+('STF00000081', 'staff81', 'pass81', 'F005', 'FD024', 'Jalan KH Amin Jasuta No. 1, Bontang, Nusa Tenggara Barat 35521', '+62(704)3315410', 'staff81@its.ac.id', 'FD024', 'F005'),
+('STF00000082', 'staff82', 'pass82', 'F002', 'FD010', 'Gang Jend. A. Yani No. 76, Probolinggo, Papua Barat 79327', '+62(004)0541152', 'staff82@its.ac.id', 'FD010', 'F002'),
+('STF00000083', 'staff83', 'pass83', 'F006', 'FD032', 'Jl. Sadang Serang No. 9, Tarakan, BA 29620', '+62(053)368-8444', 'staff83@its.ac.id', 'FD032', 'F006'),
+('STF00000084', 'staff84', 'pass84', 'F006', 'FD034', 'Gg. Joyoboyo No. 7, Banjarbaru, Papua 61497', '+62-103-241-7146', 'staff84@its.ac.id', 'FD034', 'F006'),
+('STF00000085', 'staff85', 'pass85', 'F002', 'FD011', 'Jalan H.J Maemunah No. 6, Medan, PB 27047', '(0434)9021158', 'staff85@its.ac.id', 'FD011', 'F002'),
+('STF00000086', 'staff86', 'pass86', 'F005', 'FD025', 'Gg. M.T Haryono No. 87, Parepare, MA 60898', '+62(17)2233206', 'staff86@its.ac.id', 'FD025', 'F005'),
+('STF00000087', 'staff87', 'pass87', 'F004', 'FD019', 'Jl. Kutisari Selatan No. 51, Meulaboh, Riau 48709', '0861622999', 'staff87@its.ac.id', 'FD019', 'F004'),
+('STF00000088', 'staff88', 'pass88', 'F003', 'FD015', 'Gg. Jayawijaya No. 64, Sungai Penuh, Sumatera Barat 02462', '(006)5307450', 'staff88@its.ac.id', 'FD015', 'F003'),
+('STF00000089', 'staff89', 'pass89', 'F002', 'FD010', 'Gang Rajiman No. 1, Bogor, MA 54691', '+62-736-785-0821', 'staff89@its.ac.id', 'FD010', 'F002'),
+('STF00000090', 'staff90', 'pass90', 'F007', 'FD039', 'Jl. Jend. Sudirman No. 303, Palu, BE 34578', '(010)3579727', 'staff90@its.ac.id', 'FD039', 'F007'),
+('STF00000091', 'staff91', 'pass91', 'F005', 'FD028', 'Gg. Dipatiukur No. 06, Cilegon, KT 33468', '+62-07-229-0349', 'staff91@its.ac.id', 'FD028', 'F005'),
+('STF00000092', 'staff92', 'pass92', 'F003', 'FD016', 'Gang Sentot Alibasa No. 43, Langsa, SU 91085', '0899441715', 'staff92@its.ac.id', 'FD016', 'F003'),
+('STF00000093', 'staff93', 'pass93', 'F004', 'FD022', 'Gang Suryakencana No. 4, Bukittinggi, SU 09652', '+62-74-466-6099', 'staff93@its.ac.id', 'FD022', 'F004'),
+('STF00000094', 'staff94', 'pass94', 'F006', 'FD030', 'Gg. Otto Iskandardinata No. 84, Surabaya, Kalimantan Barat 17248', '+62(51)353-4655', 'staff94@its.ac.id', 'FD030', 'F006'),
+('STF00000095', 'staff95', 'pass95', 'F005', 'FD026', 'Jalan Waringin No. 999, Parepare, KS 68460', '+62(23)5697252', 'staff95@its.ac.id', 'FD026', 'F005'),
+('STF00000096', 'staff96', 'pass96', 'F007', 'FD040', 'Jalan Raya Setiabudhi No. 0, Palopo, Kepulauan Riau 29271', '+62(96)6667600', 'staff96@its.ac.id', 'FD040', 'F007'),
+('STF00000097', 'staff97', 'pass97', 'F002', 'FD012', 'Gg. Ahmad Dahlan No. 003, Tanjungbalai, Nusa Tenggara Timur 21689', '+62(0210)447-8985', 'staff97@its.ac.id', 'FD012', 'F002'),
+('STF00000098', 'staff98', 'pass98', 'F001', 'FD003', 'Gang Setiabudhi No. 260, Jayapura, JB 09821', '+62(064)890-9010', 'staff98@its.ac.id', 'FD003', 'F001'),
+('STF00000099', 'staff99', 'pass99', 'F005', 'FD028', 'Gang Sukabumi No. 847, Gorontalo, Aceh 61849', '+62(61)8914117', 'staff99@its.ac.id', 'FD028', 'F005'),
+('STF00000100', 'staff100', 'pass100', 'F006', 'FD033', 'Jalan Setiabudhi No. 6, Cilegon, Banten 37530', '+62-11-972-1811', 'staff100@its.ac.id', 'FD033', 'F006');
+
+-- INSERT SUSTAINABILITY_COORDINATOR
+INSERT INTO SUSTAINABILITY_COORDINATOR (id, username, password, fullname, email, phone) VALUES
+('COO00000001', 'coord1', 'pass1', 'Syahrini Pradipta', 'coord1@its.ac.id', '(0447)0120455'),
+('COO00000002', 'coord2', 'pass2', 'Ulya Latupono', 'coord2@its.ac.id', '+62(000)225-5794'),
+('COO00000003', 'coord3', 'pass3', 'Cornelia Wahyudin, S.Psi', 'coord3@its.ac.id', '+62(16)674-6762'),
+('COO00000004', 'coord4', 'pass4', 'Cahyadi Halim', 'coord4@its.ac.id', '+62(16)979-7296'),
+('COO00000005', 'coord5', 'pass5', 'Tgk. Luwar Dabukke, S.E.I', 'coord5@its.ac.id', '(0716)701-4508'),
+('COO00000006', 'coord6', 'pass6', 'H. Koko Pratiwi, S.H.', 'coord6@its.ac.id', '+62(889)1637562'),
+('COO00000007', 'coord7', 'pass7', 'Drs. Rahmi Habibi, S.Ked', 'coord7@its.ac.id', '+62(87)721-7535'),
+('COO00000008', 'coord8', 'pass8', 'Alika Mayasari', 'coord8@its.ac.id', '+62-0866-317-7971'),
+('COO00000009', 'coord9', 'pass9', 'Dr. Melinda Sihotang, S.IP', 'coord9@its.ac.id', '(0016)608-8019'),
+('COO00000010', 'coord10', 'pass10', 'Hj. Ilsa Melani', 'coord10@its.ac.id', '0837550375'),
+('COO00000011', 'coord11', 'pass11', 'KH. Lukman Rahimah', 'coord11@its.ac.id', '(0571)130-5548'),
+('COO00000012', 'coord12', 'pass12', 'Tgk. Nardi Kurniawan', 'coord12@its.ac.id', '+62-027-261-4933'),
+('COO00000013', 'coord13', 'pass13', 'Wadi Wijaya', 'coord13@its.ac.id', '+62-735-160-9177'),
+('COO00000014', 'coord14', 'pass14', 'Lanjar Mayasari, S.E.I', 'coord14@its.ac.id', '(0080)869-7829'),
+('COO00000015', 'coord15', 'pass15', 'Opan Mahendra', 'coord15@its.ac.id', '+62(069)958-6693'),
+('COO00000016', 'coord16', 'pass16', 'Lala Siregar', 'coord16@its.ac.id', '+62(0722)698-4858'),
+('COO00000017', 'coord17', 'pass17', 'Darimin Pangestu, S.Kom', 'coord17@its.ac.id', '+62(0522)885-1587'),
+('COO00000018', 'coord18', 'pass18', 'Ir. Salwa Agustina', 'coord18@its.ac.id', '0846081062'),
+('COO00000019', 'coord19', 'pass19', 'Mumpuni Hakim', 'coord19@its.ac.id', '+62-424-420-4380'),
+('COO00000020', 'coord20', 'pass20', 'Yulia Hartati', 'coord20@its.ac.id', '+62(098)386-3840'),
+('COO00000021', 'coord21', 'pass21', 'Kayla Agustina', 'coord21@its.ac.id', '+62(800)4397359'),
+('COO00000022', 'coord22', 'pass22', 'H. Luhung Napitupulu', 'coord22@its.ac.id', '+62-472-122-8160'),
+('COO00000023', 'coord23', 'pass23', 'Indah Puspita', 'coord23@its.ac.id', '+62(0229)4057202'),
+('COO00000024', 'coord24', 'pass24', 'Rina Habibi', 'coord24@its.ac.id', '+62(0798)515-8328'),
+('COO00000025', 'coord25', 'pass25', 'Panji Mayasari', 'coord25@its.ac.id', '+62(68)861-5335'),
+('COO00000026', 'coord26', 'pass26', 'Karen Sihombing', 'coord26@its.ac.id', '+62-987-801-5739'),
+('COO00000027', 'coord27', 'pass27', 'R.A. Azalea Zulaika', 'coord27@its.ac.id', '+62(616)4840858'),
+('COO00000028', 'coord28', 'pass28', 'Dr. Ivan Laksita, S.Gz', 'coord28@its.ac.id', '+62(0358)112-8801'),
+('COO00000029', 'coord29', 'pass29', 'Mumpuni Usamah', 'coord29@its.ac.id', '+62-613-861-2075'),
+('COO00000030', 'coord30', 'pass30', 'Bakianto Hidayanto', 'coord30@its.ac.id', '+62-024-819-3466'),
+('COO00000031', 'coord31', 'pass31', 'Siti Waskita', 'coord31@its.ac.id', '(050)618-0919'),
+('COO00000032', 'coord32', 'pass32', 'Naradi Hidayanto', 'coord32@its.ac.id', '+62(814)491-4766'),
+('COO00000033', 'coord33', 'pass33', 'Hj. Ana Kusmawati, S.E.', 'coord33@its.ac.id', '0832684245'),
+('COO00000034', 'coord34', 'pass34', 'Kadir Puspita', 'coord34@its.ac.id', '+62(10)0996881'),
+('COO00000035', 'coord35', 'pass35', 'Fathonah Situmorang', 'coord35@its.ac.id', '+62-682-223-9431'),
+('COO00000036', 'coord36', 'pass36', 'Mumpuni Purnawati', 'coord36@its.ac.id', '+62-087-814-1413'),
+('COO00000037', 'coord37', 'pass37', 'Ratna Laksita, S.Psi', 'coord37@its.ac.id', '+62(231)491-3577'),
+('COO00000038', 'coord38', 'pass38', 'Raisa Wahyuni', 'coord38@its.ac.id', '+62(0929)955-6205'),
+('COO00000039', 'coord39', 'pass39', 'Panji Prasetya', 'coord39@its.ac.id', '(045)257-7754'),
+('COO00000040', 'coord40', 'pass40', 'Puspa Kurniawan', 'coord40@its.ac.id', '+62(91)428-3411'),
+('COO00000041', 'coord41', 'pass41', 'Samsul Mayasari', 'coord41@its.ac.id', '+62-99-693-0848'),
+('COO00000042', 'coord42', 'pass42', 'drg. Martani Maryadi', 'coord42@its.ac.id', '+62(639)427-8816'),
+('COO00000043', 'coord43', 'pass43', 'Olivia Anggriawan', 'coord43@its.ac.id', '+62-0928-272-2992'),
+('COO00000044', 'coord44', 'pass44', 'Uchita Laksmiwati, S.I.Kom', 'coord44@its.ac.id', '+62-037-314-5303'),
+('COO00000045', 'coord45', 'pass45', 'KH. Gatra Wibisono', 'coord45@its.ac.id', '(0700)518-4498'),
+('COO00000046', 'coord46', 'pass46', 'R. Keisha Yolanda', 'coord46@its.ac.id', '(059)1846386'),
+('COO00000047', 'coord47', 'pass47', 'Yuliana Situmorang', 'coord47@its.ac.id', '(0790)827-2318'),
+('COO00000048', 'coord48', 'pass48', 'Estiono Prabowo, S.E.I', 'coord48@its.ac.id', '+62(25)913-6517'),
+('COO00000049', 'coord49', 'pass49', 'Jatmiko Kuswandari, S.Kom', 'coord49@its.ac.id', '+62(60)302-9922'),
+('COO00000050', 'coord50', 'pass50', 'Kambali Gunarto, M.Farm', 'coord50@its.ac.id', '+62(02)4286990'),
+('COO00000051', 'coord51', 'pass51', 'Titi Wijayanti, S.Pd', 'coord51@its.ac.id', '+62(037)9772369'),
+('COO00000052', 'coord52', 'pass52', 'Putu Padmasari', 'coord52@its.ac.id', '+62(98)425-7991'),
+('COO00000053', 'coord53', 'pass53', 'Harja Winarno', 'coord53@its.ac.id', '+62(10)3886291'),
+('COO00000054', 'coord54', 'pass54', 'Jaswadi Susanti', 'coord54@its.ac.id', '+62-088-117-2980'),
+('COO00000055', 'coord55', 'pass55', 'Ir. Martaka Astuti, M.TI.', 'coord55@its.ac.id', '(050)863-7659'),
+('COO00000056', 'coord56', 'pass56', 'H. Umaya Permata, S.IP', 'coord56@its.ac.id', '(024)731-4986'),
+('COO00000057', 'coord57', 'pass57', 'Fitriani Ardianto', 'coord57@its.ac.id', '+62-98-180-6356'),
+('COO00000058', 'coord58', 'pass58', 'Cici Mangunsong', 'coord58@its.ac.id', '(094)486-9594'),
+('COO00000059', 'coord59', 'pass59', 'Hasta Putra, S.Farm', 'coord59@its.ac.id', '0887258874'),
+('COO00000060', 'coord60', 'pass60', 'Ratih Situmorang', 'coord60@its.ac.id', '(021)3721386'),
+('COO00000061', 'coord61', 'pass61', 'Tgk. Rama Pudjiastuti, M.Ak', 'coord61@its.ac.id', '+62-026-012-7961'),
+('COO00000062', 'coord62', 'pass62', 'Eluh Prasetya', 'coord62@its.ac.id', '+62(190)669-8490'),
+('COO00000063', 'coord63', 'pass63', 'R.M. Manah Lailasari, M.M.', 'coord63@its.ac.id', '+62-38-430-9883'),
+('COO00000064', 'coord64', 'pass64', 'R. Samiah Firgantoro', 'coord64@its.ac.id', '+62(302)146-5669'),
+('COO00000065', 'coord65', 'pass65', 'Karja Budiman', 'coord65@its.ac.id', '+62(018)4895543'),
+('COO00000066', 'coord66', 'pass66', 'R.A. Mutia Waskita', 'coord66@its.ac.id', '+62-42-681-8184'),
+('COO00000067', 'coord67', 'pass67', 'Calista Mulyani', 'coord67@its.ac.id', '+62(0894)7697357'),
+('COO00000068', 'coord68', 'pass68', 'Jagaraga Rahmawati, S.Ked', 'coord68@its.ac.id', '(0141)633-5658'),
+('COO00000069', 'coord69', 'pass69', 'Dt. Naradi Saptono', 'coord69@its.ac.id', '+62-0416-518-2755'),
+('COO00000070', 'coord70', 'pass70', 'Tugiman Pertiwi', 'coord70@its.ac.id', '+62(0237)3334333'),
+('COO00000071', 'coord71', 'pass71', 'R.A. Zalindra Safitri, S.I.Kom', 'coord71@its.ac.id', '+62(11)1790807'),
+('COO00000072', 'coord72', 'pass72', 'Raina Sihotang', 'coord72@its.ac.id', '(0947)284-6392'),
+('COO00000073', 'coord73', 'pass73', 'Karsa Anggraini', 'coord73@its.ac.id', '(0808)562-7187'),
+('COO00000074', 'coord74', 'pass74', 'Shakila Anggriawan', 'coord74@its.ac.id', '+62-36-915-5942'),
+('COO00000075', 'coord75', 'pass75', 'T. Dasa Santoso', 'coord75@its.ac.id', '(0955)276-3655'),
+('COO00000076', 'coord76', 'pass76', 'drg. Indah Hartati, S.E.', 'coord76@its.ac.id', '+62(93)1438663'),
+('COO00000077', 'coord77', 'pass77', 'Raharja Maryadi', 'coord77@its.ac.id', '(0026)728-8574'),
+('COO00000078', 'coord78', 'pass78', 'Putri Purnawati', 'coord78@its.ac.id', '+62-061-203-4717'),
+('COO00000079', 'coord79', 'pass79', 'Juli Rajata, S.I.Kom', 'coord79@its.ac.id', '+62(884)506-1593'),
+('COO00000080', 'coord80', 'pass80', 'Ir. Sadina Yulianti', 'coord80@its.ac.id', '0824558771'),
+('COO00000081', 'coord81', 'pass81', 'Raisa Suwarno', 'coord81@its.ac.id', '(0225)6996112'),
+('COO00000082', 'coord82', 'pass82', 'Ghaliyati Sihotang', 'coord82@its.ac.id', '+62(449)6475987'),
+('COO00000083', 'coord83', 'pass83', 'Eli Nashiruddin', 'coord83@its.ac.id', '+62-23-413-2611'),
+('COO00000084', 'coord84', 'pass84', 'Waluyo Kusmawati', 'coord84@its.ac.id', '0800681149'),
+('COO00000085', 'coord85', 'pass85', 'Bakiadi Yolanda', 'coord85@its.ac.id', '(043)3472282'),
+('COO00000086', 'coord86', 'pass86', 'Anom Wijayanti', 'coord86@its.ac.id', '+62(577)848-7282'),
+('COO00000087', 'coord87', 'pass87', 'Ir. Mutia Usamah', 'coord87@its.ac.id', '(088)457-8317'),
+('COO00000088', 'coord88', 'pass88', 'Karimah Zulkarnain', 'coord88@its.ac.id', '+62(0240)0825478'),
+('COO00000089', 'coord89', 'pass89', 'Malik Lestari', 'coord89@its.ac.id', '(0406)493-0853'),
+('COO00000090', 'coord90', 'pass90', 'Putri Fujiati', 'coord90@its.ac.id', '(032)6634163'),
+('COO00000091', 'coord91', 'pass91', 'KH. Raharja Suryatmi', 'coord91@its.ac.id', '+62(0484)6312241'),
+('COO00000092', 'coord92', 'pass92', 'Jaga Safitri, M.M.', 'coord92@its.ac.id', '+62(0973)5020802'),
+('COO00000093', 'coord93', 'pass93', 'Eko Santoso', 'coord93@its.ac.id', '+62(70)3120735'),
+('COO00000094', 'coord94', 'pass94', 'Ira Mandasari', 'coord94@its.ac.id', '+62(705)120-4618'),
+('COO00000095', 'coord95', 'pass95', 'Elvina Nababan', 'coord95@its.ac.id', '+62(0601)3673037'),
+('COO00000096', 'coord96', 'pass96', 'Vera Kuswoyo, M.TI.', 'coord96@its.ac.id', '+62-764-520-8814'),
+('COO00000097', 'coord97', 'pass97', 'Suci Salahudin', 'coord97@its.ac.id', '+62-503-136-5024'),
+('COO00000098', 'coord98', 'pass98', 'Puti Lala Prasasta', 'coord98@its.ac.id', '+62-09-792-5132'),
+('COO00000099', 'coord99', 'pass99', 'Cornelia Safitri', 'coord99@its.ac.id', '+62(005)2812735'),
+('COO00000100', 'coord100', 'pass100', 'KH. Mariadi Situmorang', 'coord100@its.ac.id', '(0306)5240778');
+
+-- INSERT SUSTAINABILITY_CAMPAIGN
+INSERT INTO SUSTAINABILITY_CAMPAIGN (id, title, description, start_date, end_date, target_waste_reduction, bonus_points, status, created_by, sustainability_coordinator_id) VALUES
+('CMP00000001', 'Kampanye 1', 'Molestiae laudantium necessitatibus molestiae eum iusto sint nisi similique.', '2024-08-16 14:00:05', '2024-10-07 14:00:05', 18.4, 40, 'planned', 5, 'COO00000029'),
+('CMP00000002', 'Kampanye 2', 'Minus ipsum reprehenderit molestiae iste quod.', '2024-12-28 19:21:37', '2025-02-01 19:21:37', 23.26, 15, 'ongoing', 8, 'COO00000079'),
+('CMP00000003', 'Kampanye 3', 'Quasi sunt nulla facilis nulla eum aperiam voluptas reprehenderit deleniti.', '2025-03-07 15:36:12', '2025-03-26 15:36:12', 50.99, 90, 'planned', 4, 'COO00000092'),
+('CMP00000004', 'Kampanye 4', 'Quisquam culpa eligendi illum eum atque omnis aliquam vel debitis adipisci autem.', '2024-08-28 17:29:20', '2024-10-26 17:29:20', 54.49, 41, 'ongoing', 1, 'COO00000097'),
+('CMP00000005', 'Kampanye 5', 'Adipisci odit harum laudantium numquam nihil aliquid.', '2024-09-09 00:46:40', '2024-10-02 00:46:40', 80.06, 38, 'ongoing', 9, 'COO00000060'),
+('CMP00000006', 'Kampanye 6', 'Quaerat accusamus ullam omnis unde rerum iusto odit facere quia tempora reprehenderit recusandae.', '2024-07-07 22:53:17', '2024-07-23 22:53:17', 60.17, 25, 'completed', 3, 'COO00000060'),
+('CMP00000007', 'Kampanye 7', 'Eaque aliquam architecto esse velit vero atque quam minus deleniti minima dolorum numquam.', '2024-08-23 18:56:30', '2024-11-08 18:56:30', 98.91, 86, 'completed', 8, 'COO00000079'),
+('CMP00000008', 'Kampanye 8', 'Quibusdam impedit autem odit facere itaque pariatur sunt cumque debitis illo excepturi culpa.', '2025-02-03 07:06:44', '2025-04-18 07:06:44', 48.41, 80, 'completed', 3, 'COO00000096'),
+('CMP00000009', 'Kampanye 9', 'Ut temporibus mollitia voluptatum sapiente impedit odio repudiandae eum dolores molestias.', '2024-11-07 23:20:01', '2025-01-16 23:20:01', 50.51, 41, 'planned', 5, 'COO00000099'),
+('CMP00000010', 'Kampanye 10', 'Unde ducimus vitae ipsum id quas voluptatem nisi maxime voluptatibus error error dolore.', '2025-05-13 15:23:05', '2025-07-28 15:23:05', 53.61, 40, 'completed', 8, 'COO00000010'),
+('CMP00000011', 'Kampanye 11', 'Accusantium reprehenderit porro eius mollitia nam unde culpa alias explicabo.', '2024-08-08 01:33:01', '2024-09-23 01:33:01', 31.1, 52, 'completed', 9, 'COO00000011'),
+('CMP00000012', 'Kampanye 12', 'Facilis neque doloremque repellat at id ullam quasi quam.', '2025-04-19 05:53:42', '2025-05-16 05:53:42', 23.57, 59, 'planned', 3, 'COO00000091'),
+('CMP00000013', 'Kampanye 13', 'Cupiditate repudiandae porro nemo tenetur nisi error quasi nemo aspernatur animi quo.', '2024-10-28 10:26:13', '2024-12-04 10:26:13', 15.78, 62, 'completed', 9, 'COO00000060'),
+('CMP00000014', 'Kampanye 14', 'Impedit sint sit dolorem officiis nobis accusamus quod fugit esse aliquam.', '2025-01-11 00:00:08', '2025-03-15 00:00:08', 15.6, 63, 'completed', 10, 'COO00000090'),
+('CMP00000015', 'Kampanye 15', 'Corrupti magnam dolore amet quasi hic ipsum nisi magnam dolore enim hic consequatur.', '2024-07-17 08:52:07', '2024-07-29 08:52:07', 87.11, 83, 'completed', 8, 'COO00000001'),
+('CMP00000016', 'Kampanye 16', 'Nemo aliquid id assumenda magnam quo consectetur consequatur nam laborum officiis deserunt.', '2025-02-09 12:59:56', '2025-04-05 12:59:56', 36.88, 59, 'completed', 9, 'COO00000096'),
+('CMP00000017', 'Kampanye 17', 'Doloribus asperiores quod eum unde at perferendis incidunt expedita eum nisi ad.', '2024-10-11 16:36:36', '2024-12-29 16:36:36', 81.99, 38, 'completed', 4, 'COO00000035'),
+('CMP00000018', 'Kampanye 18', 'Voluptates nulla voluptatibus ipsam corporis aliquid repellendus dicta.', '2024-11-07 11:45:17', '2025-01-11 11:45:17', 53.71, 59, 'completed', 7, 'COO00000093'),
+('CMP00000019', 'Kampanye 19', 'Quidem sequi beatae amet veniam unde sit.', '2025-04-29 19:41:42', '2025-05-30 19:41:42', 85.65, 26, 'planned', 9, 'COO00000004'),
+('CMP00000020', 'Kampanye 20', 'Accusamus possimus beatae ipsum ad distinctio modi dignissimos minima.', '2024-09-23 18:21:35', '2024-11-22 18:21:35', 63.27, 94, 'ongoing', 2, 'COO00000083'),
+('CMP00000021', 'Kampanye 21', 'Laboriosam quas consequuntur praesentium accusantium nesciunt optio aliquam cumque eligendi ratione nulla amet.', '2025-02-24 14:16:41', '2025-04-29 14:16:41', 22.21, 69, 'ongoing', 1, 'COO00000034'),
+('CMP00000022', 'Kampanye 22', 'Architecto optio optio totam facere autem.', '2024-10-06 21:44:55', '2024-12-03 21:44:55', 39.46, 68, 'completed', 6, 'COO00000098'),
+('CMP00000023', 'Kampanye 23', 'Doloremque fugit voluptate aut et sint minus delectus magnam itaque.', '2025-06-10 01:42:00', '2025-08-07 01:42:00', 35.04, 63, 'completed', 2, 'COO00000061'),
+('CMP00000024', 'Kampanye 24', 'Aliquam ullam esse laudantium quia accusantium.', '2025-03-08 01:44:11', '2025-03-20 01:44:11', 77.41, 16, 'completed', 4, 'COO00000084'),
+('CMP00000025', 'Kampanye 25', 'Explicabo esse voluptatum voluptatem eius aperiam ducimus harum voluptatum voluptatibus.', '2025-01-16 19:54:07', '2025-02-03 19:54:07', 80.31, 93, 'ongoing', 1, 'COO00000032'),
+('CMP00000026', 'Kampanye 26', 'Dolorem exercitationem hic consequatur quas maxime perspiciatis sit placeat.', '2024-11-24 09:19:16', '2024-12-29 09:19:16', 85.53, 89, 'ongoing', 4, 'COO00000017'),
+('CMP00000027', 'Kampanye 27', 'Nemo incidunt est non ipsum consectetur officiis neque placeat.', '2024-09-01 21:09:37', '2024-11-10 21:09:37', 70.25, 82, 'ongoing', 8, 'COO00000090'),
+('CMP00000028', 'Kampanye 28', 'Est provident minima consequatur voluptatum voluptate corporis.', '2025-06-12 15:57:42', '2025-07-24 15:57:42', 79.02, 31, 'planned', 10, 'COO00000096'),
+('CMP00000029', 'Kampanye 29', 'Totam et nam veniam blanditiis et sunt quas quisquam sunt impedit illum ipsam.', '2025-06-12 22:50:45', '2025-07-06 22:50:45', 80.0, 30, 'completed', 2, 'COO00000075'),
+('CMP00000030', 'Kampanye 30', 'Corrupti deleniti consectetur ad voluptates nulla non nostrum nisi.', '2024-09-12 23:45:06', '2024-09-25 23:45:06', 93.6, 83, 'planned', 7, 'COO00000051'),
+('CMP00000031', 'Kampanye 31', 'Facere porro labore magnam non quae.', '2024-11-07 13:02:48', '2024-12-12 13:02:48', 16.84, 98, 'planned', 4, 'COO00000014'),
+('CMP00000032', 'Kampanye 32', 'Sequi laudantium consequuntur deserunt adipisci quisquam accusamus earum.', '2024-11-22 17:20:30', '2025-01-09 17:20:30', 86.53, 86, 'ongoing', 10, 'COO00000006'),
+('CMP00000033', 'Kampanye 33', 'Quia voluptates quidem architecto unde voluptates sint laudantium.', '2024-10-19 11:44:21', '2024-12-12 11:44:21', 57.95, 94, 'completed', 2, 'COO00000065'),
+('CMP00000034', 'Kampanye 34', 'Suscipit incidunt quod non repudiandae quam hic vel nemo modi odit.', '2025-03-15 18:17:49', '2025-05-07 18:17:49', 11.14, 63, 'completed', 2, 'COO00000056'),
+('CMP00000035', 'Kampanye 35', 'Maxime iste repudiandae aliquam voluptatum maxime.', '2024-11-15 22:51:21', '2025-01-10 22:51:21', 67.2, 68, 'planned', 3, 'COO00000056'),
+('CMP00000036', 'Kampanye 36', 'Nam maiores occaecati aliquid enim id.', '2024-10-11 14:08:34', '2024-11-12 14:08:34', 76.04, 93, 'completed', 10, 'COO00000069'),
+('CMP00000037', 'Kampanye 37', 'Itaque in nostrum amet maxime consequuntur rerum iste quam.', '2024-07-29 06:19:41', '2024-10-08 06:19:41', 51.84, 85, 'completed', 6, 'COO00000032'),
+('CMP00000038', 'Kampanye 38', 'Quod vel possimus consequatur impedit iste debitis nihil.', '2025-03-19 01:43:35', '2025-04-09 01:43:35', 35.1, 67, 'ongoing', 8, 'COO00000073'),
+('CMP00000039', 'Kampanye 39', 'Sunt at eum officiis quae cum quasi at.', '2025-03-16 14:00:09', '2025-06-12 14:00:09', 70.14, 53, 'ongoing', 8, 'COO00000042'),
+('CMP00000040', 'Kampanye 40', 'Odio assumenda provident quas voluptate nostrum cum mollitia aliquam cupiditate excepturi.', '2025-05-19 16:38:50', '2025-06-21 16:38:50', 53.88, 55, 'completed', 6, 'COO00000036'),
+('CMP00000041', 'Kampanye 41', 'Cum corporis quisquam amet est quas vero.', '2024-10-05 11:07:19', '2024-12-30 11:07:19', 73.11, 45, 'planned', 1, 'COO00000067'),
+('CMP00000042', 'Kampanye 42', 'Debitis tempore vero a quisquam accusamus libero libero rem non laudantium dolor optio iste.', '2024-12-03 22:04:09', '2025-01-06 22:04:09', 17.71, 62, 'completed', 9, 'COO00000098'),
+('CMP00000043', 'Kampanye 43', 'Nobis ab sunt eius occaecati reprehenderit dignissimos.', '2024-08-26 02:19:33', '2024-10-05 02:19:33', 72.15, 92, 'planned', 8, 'COO00000058'),
+('CMP00000044', 'Kampanye 44', 'Animi expedita corporis adipisci neque nobis ex.', '2024-07-19 08:56:26', '2024-07-31 08:56:26', 18.37, 38, 'completed', 4, 'COO00000040'),
+('CMP00000045', 'Kampanye 45', 'Autem voluptatibus cum eligendi optio praesentium.', '2025-01-23 13:33:10', '2025-04-17 13:33:10', 43.21, 80, 'planned', 6, 'COO00000055'),
+('CMP00000046', 'Kampanye 46', 'Debitis iste neque ut at error fuga fugiat architecto incidunt mollitia eos consequatur.', '2025-03-12 01:48:53', '2025-05-31 01:48:53', 39.77, 99, 'completed', 5, 'COO00000040'),
+('CMP00000047', 'Kampanye 47', 'Eveniet impedit distinctio distinctio animi necessitatibus voluptatem minus assumenda.', '2025-03-23 12:21:09', '2025-05-04 12:21:09', 30.75, 34, 'completed', 2, 'COO00000096'),
+('CMP00000048', 'Kampanye 48', 'Ut voluptates enim non et minima voluptatum explicabo consectetur natus maxime occaecati laudantium.', '2024-08-24 04:20:57', '2024-11-10 04:20:57', 95.58, 98, 'ongoing', 4, 'COO00000028'),
+('CMP00000049', 'Kampanye 49', 'Doloremque enim deserunt blanditiis iure reiciendis qui dignissimos nostrum impedit aliquid expedita rem.', '2024-09-05 18:37:31', '2024-11-15 18:37:31', 34.88, 85, 'planned', 10, 'COO00000037'),
+('CMP00000050', 'Kampanye 50', 'Odit porro ducimus architecto error mollitia.', '2025-04-09 04:45:16', '2025-05-01 04:45:16', 84.94, 47, 'ongoing', 6, 'COO00000023'),
+('CMP00000051', 'Kampanye 51', 'Beatae ex id necessitatibus vero rerum.', '2024-08-29 15:50:55', '2024-10-16 15:50:55', 11.27, 78, 'ongoing', 5, 'COO00000006'),
+('CMP00000052', 'Kampanye 52', 'Rerum ullam laboriosam labore alias consequatur culpa itaque sint tempore.', '2024-12-11 22:01:33', '2024-12-27 22:01:33', 59.8, 99, 'ongoing', 8, 'COO00000014'),
+('CMP00000053', 'Kampanye 53', 'Unde animi maxime natus perspiciatis nam accusantium neque ex totam recusandae.', '2024-07-11 00:38:33', '2024-07-22 00:38:33', 61.67, 70, 'completed', 8, 'COO00000044'),
+('CMP00000054', 'Kampanye 54', 'Eligendi adipisci voluptates occaecati sapiente necessitatibus harum.', '2025-02-01 11:04:58', '2025-03-06 11:04:58', 96.89, 42, 'completed', 2, 'COO00000009'),
+('CMP00000055', 'Kampanye 55', 'Sint quibusdam provident et adipisci impedit libero.', '2024-09-15 14:28:43', '2024-11-15 14:28:43', 54.26, 83, 'planned', 1, 'COO00000020'),
+('CMP00000056', 'Kampanye 56', 'Iste veritatis dolor esse beatae quos quod totam ipsam ad.', '2024-12-19 18:14:22', '2025-01-17 18:14:22', 83.0, 48, 'ongoing', 4, 'COO00000016'),
+('CMP00000057', 'Kampanye 57', 'Culpa excepturi laboriosam soluta est eveniet quo atque voluptatem maiores voluptatibus dignissimos.', '2024-06-29 12:11:12', '2024-09-18 12:11:12', 78.8, 87, 'planned', 10, 'COO00000029'),
+('CMP00000058', 'Kampanye 58', 'Harum sint blanditiis est aliquid sed sit ex suscipit aut quisquam.', '2025-03-31 20:33:58', '2025-06-15 20:33:58', 44.23, 66, 'completed', 10, 'COO00000055'),
+('CMP00000059', 'Kampanye 59', 'Ad quis odit distinctio dicta enim minus quo perferendis.', '2024-09-29 04:48:50', '2024-11-17 04:48:50', 61.18, 17, 'planned', 2, 'COO00000098'),
+('CMP00000060', 'Kampanye 60', 'Culpa beatae vero nam aut molestiae molestias.', '2024-09-28 13:52:52', '2024-11-03 13:52:52', 66.3, 43, 'planned', 2, 'COO00000021'),
+('CMP00000061', 'Kampanye 61', 'Velit rem nemo cupiditate est tempora molestiae.', '2024-07-05 00:17:41', '2024-08-14 00:17:41', 25.64, 19, 'ongoing', 1, 'COO00000053'),
+('CMP00000062', 'Kampanye 62', 'Adipisci temporibus amet fugit assumenda hic provident.', '2025-05-27 10:47:09', '2025-08-02 10:47:09', 72.04, 70, 'completed', 1, 'COO00000030'),
+('CMP00000063', 'Kampanye 63', 'Occaecati porro ipsum explicabo ex dicta quis repellat aspernatur ullam quisquam necessitatibus at.', '2025-04-22 21:56:28', '2025-06-07 21:56:28', 73.63, 99, 'completed', 2, 'COO00000088'),
+('CMP00000064', 'Kampanye 64', 'Atque est officia quisquam iusto veniam corporis tempore ducimus facilis delectus.', '2025-06-06 13:00:59', '2025-07-15 13:00:59', 93.15, 90, 'planned', 4, 'COO00000055'),
+('CMP00000065', 'Kampanye 65', 'Ratione sunt iste adipisci labore expedita itaque cupiditate quisquam non.', '2024-08-03 18:53:26', '2024-08-27 18:53:26', 59.01, 92, 'ongoing', 5, 'COO00000019'),
+('CMP00000066', 'Kampanye 66', 'Aut repellendus reiciendis eveniet officiis recusandae minus id impedit nulla molestias voluptate.', '2024-11-11 08:55:16', '2024-11-30 08:55:16', 15.37, 49, 'planned', 10, 'COO00000037'),
+('CMP00000067', 'Kampanye 67', 'Exercitationem repellendus nihil quos ipsa ratione.', '2025-01-12 18:51:03', '2025-03-19 18:51:03', 21.19, 98, 'completed', 7, 'COO00000035'),
+('CMP00000068', 'Kampanye 68', 'Cupiditate pariatur qui quae saepe beatae nisi eveniet atque.', '2024-12-05 05:12:30', '2025-02-17 05:12:30', 58.6, 66, 'ongoing', 10, 'COO00000006'),
+('CMP00000069', 'Kampanye 69', 'Est illo nisi placeat nisi reprehenderit eveniet officia.', '2024-07-09 04:32:54', '2024-09-12 04:32:54', 76.11, 87, 'completed', 1, 'COO00000012'),
+('CMP00000070', 'Kampanye 70', 'Dolor consequuntur neque quidem repellat quidem optio.', '2024-12-08 05:31:12', '2025-01-16 05:31:12', 96.57, 83, 'planned', 1, 'COO00000098'),
+('CMP00000071', 'Kampanye 71', 'Eos nulla ipsum dignissimos soluta error recusandae perspiciatis ullam vel quaerat totam.', '2024-07-19 23:42:41', '2024-09-01 23:42:41', 61.86, 32, 'completed', 9, 'COO00000084'),
+('CMP00000072', 'Kampanye 72', 'Ab voluptates illo consectetur eos fuga molestias amet provident reprehenderit facere similique sint.', '2024-09-14 16:05:56', '2024-11-19 16:05:56', 92.45, 33, 'planned', 7, 'COO00000082'),
+('CMP00000073', 'Kampanye 73', 'Praesentium hic et fugit fugit molestias optio labore deleniti fugit unde.', '2025-05-07 12:30:43', '2025-07-18 12:30:43', 97.21, 70, 'completed', 7, 'COO00000043'),
+('CMP00000074', 'Kampanye 74', 'Culpa voluptatum pariatur consequatur asperiores accusamus quam laborum ipsa voluptatibus assumenda.', '2025-02-19 17:37:48', '2025-04-11 17:37:48', 70.31, 30, 'completed', 7, 'COO00000089'),
+('CMP00000075', 'Kampanye 75', 'Similique tempora possimus ut numquam iste incidunt reprehenderit harum dolorem incidunt.', '2024-06-18 04:44:42', '2024-08-30 04:44:42', 35.94, 61, 'planned', 1, 'COO00000059'),
+('CMP00000076', 'Kampanye 76', 'Libero quasi quae earum unde nemo alias alias laboriosam fuga neque vitae aspernatur.', '2025-03-25 21:18:51', '2025-04-15 21:18:51', 38.31, 51, 'ongoing', 7, 'COO00000066'),
+('CMP00000077', 'Kampanye 77', 'Voluptates voluptates quod iure aspernatur suscipit at iusto qui vero aspernatur odio.', '2025-04-21 06:18:26', '2025-05-01 06:18:26', 69.19, 79, 'completed', 7, 'COO00000007'),
+('CMP00000078', 'Kampanye 78', 'Est amet exercitationem quod iusto maiores iusto quasi in vero reiciendis enim alias.', '2025-06-08 17:12:47', '2025-07-12 17:12:47', 56.66, 89, 'completed', 8, 'COO00000098'),
+('CMP00000079', 'Kampanye 79', 'Quibusdam quas natus aperiam labore cumque amet voluptatibus repellat numquam enim assumenda magni.', '2025-05-11 23:32:14', '2025-05-27 23:32:14', 28.32, 80, 'ongoing', 5, 'COO00000057'),
+('CMP00000080', 'Kampanye 80', 'Dolorum nulla eius ducimus qui nobis tenetur qui omnis.', '2024-11-05 21:58:08', '2025-01-16 21:58:08', 20.93, 90, 'planned', 4, 'COO00000091'),
+('CMP00000081', 'Kampanye 81', 'Ea praesentium laborum reiciendis similique exercitationem assumenda corporis.', '2025-06-13 00:27:41', '2025-07-13 00:27:41', 37.97, 11, 'planned', 7, 'COO00000012'),
+('CMP00000082', 'Kampanye 82', 'Saepe quidem impedit fugit optio quas cumque.', '2025-01-25 16:34:54', '2025-03-04 16:34:54', 99.3, 24, 'completed', 2, 'COO00000083'),
+('CMP00000083', 'Kampanye 83', 'Amet eaque reprehenderit amet iure labore labore veniam ullam doloremque.', '2025-03-07 18:16:01', '2025-04-05 18:16:01', 54.85, 47, 'planned', 5, 'COO00000054'),
+('CMP00000084', 'Kampanye 84', 'Labore corporis sit accusamus unde ipsum perspiciatis vitae placeat aliquam.', '2025-06-06 17:11:22', '2025-08-16 17:11:22', 98.22, 41, 'completed', 9, 'COO00000019'),
+('CMP00000085', 'Kampanye 85', 'Odit vero inventore ullam similique ex eaque atque omnis hic quo quibusdam.', '2025-03-27 11:47:23', '2025-05-25 11:47:23', 27.15, 86, 'planned', 3, 'COO00000009'),
+('CMP00000086', 'Kampanye 86', 'Quo maxime perspiciatis voluptatibus et ab ab architecto illum minima placeat expedita quam.', '2024-09-21 03:20:03', '2024-11-05 03:20:03', 79.54, 63, 'completed', 9, 'COO00000035'),
+('CMP00000087', 'Kampanye 87', 'Alias nulla animi nisi tempora dolor nobis commodi.', '2024-07-31 21:45:36', '2024-08-10 21:45:36', 35.46, 48, 'planned', 10, 'COO00000085'),
+('CMP00000088', 'Kampanye 88', 'Sequi consectetur omnis tempore necessitatibus voluptas tempore.', '2025-03-12 11:27:15', '2025-05-23 11:27:15', 87.87, 67, 'planned', 8, 'COO00000045'),
+('CMP00000089', 'Kampanye 89', 'Ducimus iure vel odit ullam eius incidunt temporibus.', '2025-04-10 07:17:56', '2025-06-01 07:17:56', 59.67, 79, 'completed', 8, 'COO00000042'),
+('CMP00000090', 'Kampanye 90', 'Ducimus quos eius aperiam harum voluptatum ducimus repellat debitis architecto.', '2025-06-10 22:32:38', '2025-07-14 22:32:38', 98.27, 40, 'planned', 7, 'COO00000030'),
+('CMP00000091', 'Kampanye 91', 'Nostrum debitis laudantium corporis quisquam dolor officia totam.', '2025-03-20 03:30:24', '2025-05-21 03:30:24', 13.93, 70, 'planned', 7, 'COO00000050'),
+('CMP00000092', 'Kampanye 92', 'Aut asperiores necessitatibus dolorum ipsum tempore corrupti odit ut.', '2025-02-28 10:04:04', '2025-03-29 10:04:04', 54.58, 14, 'ongoing', 9, 'COO00000076'),
+('CMP00000093', 'Kampanye 93', 'Eaque praesentium temporibus nemo maiores velit laudantium ipsa sapiente quos.', '2025-04-16 07:46:50', '2025-06-07 07:46:50', 88.27, 66, 'ongoing', 9, 'COO00000059'),
+('CMP00000094', 'Kampanye 94', 'Molestiae a veritatis repellendus laboriosam necessitatibus.', '2025-06-13 10:43:02', '2025-06-24 10:43:02', 75.02, 62, 'planned', 3, 'COO00000010'),
+('CMP00000095', 'Kampanye 95', 'Ex esse animi voluptatum officia facilis sequi excepturi sapiente quis.', '2024-10-05 22:06:11', '2024-12-14 22:06:11', 80.34, 43, 'completed', 10, 'COO00000089'),
+('CMP00000096', 'Kampanye 96', 'Debitis aliquam fugit deleniti possimus tempore occaecati facere.', '2024-07-18 06:28:05', '2024-09-16 06:28:05', 68.49, 52, 'planned', 9, 'COO00000049'),
+('CMP00000097', 'Kampanye 97', 'Ipsa deleniti alias ad voluptatum dolores harum recusandae officia libero vitae repellat vitae accusamus.', '2024-10-25 01:51:32', '2024-12-14 01:51:32', 66.41, 72, 'planned', 1, 'COO00000080'),
+('CMP00000098', 'Kampanye 98', 'Excepturi quam illo distinctio omnis minima.', '2025-03-05 15:38:09', '2025-03-23 15:38:09', 31.13, 97, 'completed', 4, 'COO00000096'),
+('CMP00000099', 'Kampanye 99', 'Corrupti neque unde alias consequuntur officiis iusto ullam aliquid praesentium consectetur cupiditate.', '2024-07-04 17:08:05', '2024-07-25 17:08:05', 49.06, 22, 'planned', 2, 'COO00000057'),
+('CMP00000100', 'Kampanye 100', 'Reprehenderit atque nostrum saepe aperiam repellendus beatae nisi nulla.', '2024-07-09 19:43:16', '2024-08-09 19:43:16', 72.46, 13, 'ongoing', 6, 'COO00000008');
+
+-- INSERT USER_SUSTAINABILITY_CAMPAIGN
+INSERT INTO USER_SUSTAINABILITY_CAMPAIGN (id, status, sustainability_campaign_id, user_id) VALUES
+('USC00000001', 'completed', 'CMP00000048', 'USR00000056'),
+('USC00000002', 'joined', 'CMP00000032', 'USR00000068'),
+('USC00000003', 'completed', 'CMP00000073', 'USR00000088'),
+('USC00000004', 'joined', 'CMP00000022', 'USR00000023'),
+('USC00000005', 'joined', 'CMP00000079', 'USR00000049'),
+('USC00000006', 'pending', 'CMP00000088', 'USR00000031'),
+('USC00000007', 'completed', 'CMP00000075', 'USR00000019'),
+('USC00000008', 'joined', 'CMP00000060', 'USR00000082'),
+('USC00000009', 'completed', 'CMP00000059', 'USR00000033'),
+('USC00000010', 'pending', 'CMP00000002', 'USR00000060'),
+('USC00000011', 'completed', 'CMP00000087', 'USR00000070'),
+('USC00000012', 'joined', 'CMP00000010', 'USR00000057'),
+('USC00000013', 'completed', 'CMP00000076', 'USR00000039'),
+('USC00000014', 'pending', 'CMP00000055', 'USR00000089'),
+('USC00000015', 'completed', 'CMP00000059', 'USR00000039'),
+('USC00000016', 'joined', 'CMP00000050', 'USR00000062'),
+('USC00000017', 'joined', 'CMP00000031', 'USR00000049'),
+('USC00000018', 'pending', 'CMP00000046', 'USR00000074'),
+('USC00000019', 'completed', 'CMP00000090', 'USR00000038'),
+('USC00000020', 'joined', 'CMP00000085', 'USR00000051'),
+('USC00000021', 'completed', 'CMP00000002', 'USR00000073'),
+('USC00000022', 'pending', 'CMP00000100', 'USR00000096'),
+('USC00000023', 'joined', 'CMP00000078', 'USR00000096'),
+('USC00000024', 'completed', 'CMP00000037', 'USR00000100'),
+('USC00000025', 'joined', 'CMP00000078', 'USR00000046'),
+('USC00000026', 'joined', 'CMP00000082', 'USR00000025'),
+('USC00000027', 'pending', 'CMP00000033', 'USR00000087'),
+('USC00000028', 'pending', 'CMP00000099', 'USR00000085'),
+('USC00000029', 'pending', 'CMP00000018', 'USR00000081'),
+('USC00000030', 'joined', 'CMP00000081', 'USR00000083'),
+('USC00000031', 'joined', 'CMP00000040', 'USR00000057'),
+('USC00000032', 'joined', 'CMP00000075', 'USR00000047'),
+('USC00000033', 'pending', 'CMP00000017', 'USR00000012'),
+('USC00000034', 'completed', 'CMP00000042', 'USR00000096'),
+('USC00000035', 'completed', 'CMP00000023', 'USR00000026'),
+('USC00000036', 'joined', 'CMP00000070', 'USR00000047'),
+('USC00000037', 'pending', 'CMP00000065', 'USR00000035'),
+('USC00000038', 'joined', 'CMP00000033', 'USR00000062'),
+('USC00000039', 'completed', 'CMP00000096', 'USR00000044'),
+('USC00000040', 'joined', 'CMP00000060', 'USR00000010'),
+('USC00000041', 'joined', 'CMP00000097', 'USR00000029'),
+('USC00000042', 'pending', 'CMP00000093', 'USR00000087'),
+('USC00000043', 'completed', 'CMP00000072', 'USR00000047'),
+('USC00000044', 'joined', 'CMP00000051', 'USR00000002'),
+('USC00000045', 'completed', 'CMP00000069', 'USR00000016'),
+('USC00000046', 'completed', 'CMP00000048', 'USR00000087'),
+('USC00000047', 'pending', 'CMP00000087', 'USR00000034'),
+('USC00000048', 'pending', 'CMP00000049', 'USR00000082'),
+('USC00000049', 'completed', 'CMP00000014', 'USR00000087'),
+('USC00000050', 'joined', 'CMP00000061', 'USR00000004'),
+('USC00000051', 'pending', 'CMP00000072', 'USR00000042'),
+('USC00000052', 'pending', 'CMP00000029', 'USR00000083'),
+('USC00000053', 'joined', 'CMP00000082', 'USR00000060'),
+('USC00000054', 'pending', 'CMP00000039', 'USR00000084'),
+('USC00000055', 'completed', 'CMP00000015', 'USR00000018'),
+('USC00000056', 'joined', 'CMP00000005', 'USR00000039'),
+('USC00000057', 'completed', 'CMP00000015', 'USR00000013'),
+('USC00000058', 'joined', 'CMP00000069', 'USR00000018'),
+('USC00000059', 'completed', 'CMP00000059', 'USR00000048'),
+('USC00000060', 'pending', 'CMP00000096', 'USR00000090'),
+('USC00000061', 'pending', 'CMP00000054', 'USR00000076'),
+('USC00000062', 'pending', 'CMP00000094', 'USR00000020'),
+('USC00000063', 'completed', 'CMP00000084', 'USR00000013'),
+('USC00000064', 'completed', 'CMP00000079', 'USR00000053'),
+('USC00000065', 'completed', 'CMP00000005', 'USR00000089'),
+('USC00000066', 'completed', 'CMP00000028', 'USR00000057'),
+('USC00000067', 'completed', 'CMP00000031', 'USR00000047'),
+('USC00000068', 'joined', 'CMP00000088', 'USR00000048'),
+('USC00000069', 'pending', 'CMP00000083', 'USR00000046'),
+('USC00000070', 'joined', 'CMP00000051', 'USR00000036'),
+('USC00000071', 'joined', 'CMP00000016', 'USR00000059'),
+('USC00000072', 'joined', 'CMP00000085', 'USR00000028'),
+('USC00000073', 'pending', 'CMP00000082', 'USR00000077'),
+('USC00000074', 'joined', 'CMP00000007', 'USR00000043'),
+('USC00000075', 'joined', 'CMP00000017', 'USR00000073'),
+('USC00000076', 'joined', 'CMP00000009', 'USR00000098'),
+('USC00000077', 'pending', 'CMP00000027', 'USR00000076'),
+('USC00000078', 'joined', 'CMP00000030', 'USR00000043'),
+('USC00000079', 'joined', 'CMP00000077', 'USR00000001'),
+('USC00000080', 'completed', 'CMP00000019', 'USR00000017'),
+('USC00000081', 'pending', 'CMP00000033', 'USR00000023'),
+('USC00000082', 'joined', 'CMP00000085', 'USR00000004'),
+('USC00000083', 'joined', 'CMP00000002', 'USR00000046'),
+('USC00000084', 'joined', 'CMP00000076', 'USR00000042'),
+('USC00000085', 'joined', 'CMP00000023', 'USR00000034'),
+('USC00000086', 'joined', 'CMP00000017', 'USR00000095'),
+('USC00000087', 'completed', 'CMP00000068', 'USR00000015'),
+('USC00000088', 'pending', 'CMP00000009', 'USR00000061'),
+('USC00000089', 'completed', 'CMP00000100', 'USR00000047'),
+('USC00000090', 'pending', 'CMP00000076', 'USR00000014'),
+('USC00000091', 'completed', 'CMP00000065', 'USR00000029'),
+('USC00000092', 'pending', 'CMP00000006', 'USR00000094'),
+('USC00000093', 'pending', 'CMP00000067', 'USR00000039'),
+('USC00000094', 'completed', 'CMP00000083', 'USR00000004'),
+('USC00000095', 'joined', 'CMP00000062', 'USR00000052'),
+('USC00000096', 'completed', 'CMP00000088', 'USR00000014'),
+('USC00000097', 'completed', 'CMP00000092', 'USR00000057'),
+('USC00000098', 'joined', 'CMP00000011', 'USR00000042'),
+('USC00000099', 'pending', 'CMP00000019', 'USR00000009'),
+('USC00000100', 'joined', 'CMP00000036', 'USR00000080');
+
+-- INSERT BIN_TYPE
+INSERT INTO BIN_TYPE (id, name, description, color_code, status) VALUES
+('BNT00000001', 'Type 1', 'Incidunt repellat voluptatem perspiciatis eveniet.', '#FF00FF', 'inactive'),
+('BNT00000002', 'Type 2', 'Molestias eum vitae distinctio aliquid cupiditate aperiam.', '#FFFF00', 'inactive'),
+('BNT00000003', 'Type 3', 'Consequuntur impedit possimus mollitia ipsa.', '#FFFF00', 'inactive'),
+('BNT00000004', 'Type 4', 'Aliquam aut sed nostrum quod accusamus laborum ab.', '#FF0000', 'active'),
+('BNT00000005', 'Type 5', 'Unde provident nisi eligendi.', '#FF00FF', 'active'),
+('BNT00000006', 'Type 6', 'Possimus dignissimos odit minima illum vel nostrum.', '#FFFF00', 'inactive'),
+('BNT00000007', 'Type 7', 'Nisi quaerat nostrum.', '#00FF00', 'inactive'),
+('BNT00000008', 'Type 8', 'Occaecati quos expedita a.', '#0000FF', 'inactive'),
+('BNT00000009', 'Type 9', 'Deleniti voluptates voluptate nulla sint.', '#FFFF00', 'inactive'),
+('BNT00000010', 'Type 10', 'Magni iure occaecati dignissimos amet beatae corrupti.', '#FF0000', 'inactive'),
+('BNT00000011', 'Type 11', 'Libero cum ullam amet facilis distinctio dolorum.', '#FFFF00', 'inactive'),
+('BNT00000012', 'Type 12', 'Rem quis aliquam qui unde debitis quos laborum.', '#0000FF', 'inactive'),
+('BNT00000013', 'Type 13', 'Architecto doloremque ipsam neque.', '#00FF00', 'inactive'),
+('BNT00000014', 'Type 14', 'Dicta perspiciatis eveniet quod eveniet atque.', '#FF0000', 'active'),
+('BNT00000015', 'Type 15', 'Sit fugiat dolore iusto laborum tempora.', '#FF0000', 'active'),
+('BNT00000016', 'Type 16', 'Dolor non debitis fuga.', '#FFFF00', 'active'),
+('BNT00000017', 'Type 17', 'Quam odio voluptate dicta consectetur porro animi.', '#0000FF', 'active'),
+('BNT00000018', 'Type 18', 'Beatae iure in quis.', '#FF00FF', 'active'),
+('BNT00000019', 'Type 19', 'Suscipit nobis ratione odit nostrum.', '#FF00FF', 'inactive'),
+('BNT00000020', 'Type 20', 'Neque mollitia dolorem illum.', '#FF0000', 'inactive'),
+('BNT00000021', 'Type 21', 'Laudantium voluptatum nihil saepe eius quas quasi.', '#0000FF', 'inactive'),
+('BNT00000022', 'Type 22', 'Dolorum ipsa dolore unde veniam.', '#FF0000', 'inactive'),
+('BNT00000023', 'Type 23', 'Tempore in aliquid voluptatibus quasi magnam incidunt.', '#FF00FF', 'inactive'),
+('BNT00000024', 'Type 24', 'Laboriosam reiciendis reprehenderit iste dolores nam.', '#0000FF', 'active'),
+('BNT00000025', 'Type 25', 'Possimus illum dolor.', '#FF00FF', 'active'),
+('BNT00000026', 'Type 26', 'Eos officia at laboriosam esse provident.', '#00FF00', 'inactive'),
+('BNT00000027', 'Type 27', 'Quibusdam ad iste quo soluta illo ratione.', '#00FF00', 'active'),
+('BNT00000028', 'Type 28', 'Occaecati provident a occaecati harum porro.', '#0000FF', 'inactive'),
+('BNT00000029', 'Type 29', 'Adipisci incidunt earum veniam molestiae recusandae ratione.', '#FF0000', 'inactive'),
+('BNT00000030', 'Type 30', 'Nulla excepturi ut maiores.', '#FF00FF', 'active'),
+('BNT00000031', 'Type 31', 'Suscipit beatae facilis nulla facilis cupiditate.', '#FFFF00', 'active'),
+('BNT00000032', 'Type 32', 'Provident natus quo consequuntur ex molestiae officiis.', '#FF00FF', 'inactive'),
+('BNT00000033', 'Type 33', 'Sit praesentium quidem quis eum tempore magnam in.', '#FF0000', 'active'),
+('BNT00000034', 'Type 34', 'Aperiam exercitationem laborum.', '#0000FF', 'inactive'),
+('BNT00000035', 'Type 35', 'Repudiandae iusto minus repudiandae tempore iste fuga.', '#0000FF', 'inactive'),
+('BNT00000036', 'Type 36', 'Deleniti sunt assumenda hic.', '#FF0000', 'active'),
+('BNT00000037', 'Type 37', 'Enim vero autem eius.', '#00FF00', 'inactive'),
+('BNT00000038', 'Type 38', 'Libero soluta maxime occaecati.', '#FF0000', 'active'),
+('BNT00000039', 'Type 39', 'Impedit placeat ut labore in.', '#FF0000', 'active'),
+('BNT00000040', 'Type 40', 'Eos aperiam sit.', '#FF00FF', 'active'),
+('BNT00000041', 'Type 41', 'Rerum maxime excepturi neque omnis.', '#FFFF00', 'inactive'),
+('BNT00000042', 'Type 42', 'Laborum pariatur minus molestias itaque necessitatibus.', '#FFFF00', 'inactive'),
+('BNT00000043', 'Type 43', 'Cupiditate ea laborum voluptas quo.', '#00FF00', 'inactive'),
+('BNT00000044', 'Type 44', 'Corporis eligendi vero.', '#0000FF', 'inactive'),
+('BNT00000045', 'Type 45', 'Unde quae eligendi voluptate saepe possimus pariatur corrupti.', '#FF00FF', 'active'),
+('BNT00000046', 'Type 46', 'Blanditiis voluptatibus nemo ipsam fuga.', '#FF0000', 'active'),
+('BNT00000047', 'Type 47', 'Natus alias et exercitationem fuga.', '#00FF00', 'active'),
+('BNT00000048', 'Type 48', 'Voluptate modi commodi ad ut quisquam veniam.', '#FF0000', 'inactive'),
+('BNT00000049', 'Type 49', 'Culpa voluptas molestias magni officia eos.', '#FFFF00', 'inactive'),
+('BNT00000050', 'Type 50', 'Voluptas quidem voluptatibus pariatur reiciendis.', '#FFFF00', 'inactive'),
+('BNT00000051', 'Type 51', 'Excepturi beatae laboriosam aliquam perspiciatis blanditiis.', '#FFFF00', 'inactive'),
+('BNT00000052', 'Type 52', 'Illo sapiente ipsum.', '#00FF00', 'active'),
+('BNT00000053', 'Type 53', 'Eveniet non deserunt minima.', '#0000FF', 'inactive'),
+('BNT00000054', 'Type 54', 'Deserunt assumenda sed perspiciatis vero.', '#FF0000', 'inactive'),
+('BNT00000055', 'Type 55', 'Hic laudantium nobis maiores animi pariatur id.', '#FF00FF', 'inactive'),
+('BNT00000056', 'Type 56', 'Fuga fuga eligendi expedita voluptate soluta.', '#FF00FF', 'inactive'),
+('BNT00000057', 'Type 57', 'Dolor suscipit qui impedit.', '#FF0000', 'active'),
+('BNT00000058', 'Type 58', 'Enim rem voluptas incidunt tempore consequuntur.', '#FFFF00', 'active'),
+('BNT00000059', 'Type 59', 'Nisi corporis esse voluptates minima excepturi ut nihil.', '#FF0000', 'active'),
+('BNT00000060', 'Type 60', 'At illum totam impedit nam quae.', '#0000FF', 'active'),
+('BNT00000061', 'Type 61', 'Dicta rerum enim laudantium.', '#00FF00', 'inactive'),
+('BNT00000062', 'Type 62', 'Rerum esse nam iure ad.', '#0000FF', 'inactive'),
+('BNT00000063', 'Type 63', 'Culpa error odit.', '#FF0000', 'active'),
+('BNT00000064', 'Type 64', 'Commodi pariatur enim debitis tenetur officia adipisci.', '#FFFF00', 'inactive'),
+('BNT00000065', 'Type 65', 'Laudantium voluptas nisi facere laboriosam.', '#00FF00', 'active'),
+('BNT00000066', 'Type 66', 'Sit occaecati labore possimus blanditiis maiores.', '#FFFF00', 'active'),
+('BNT00000067', 'Type 67', 'Accusantium ea neque corporis itaque possimus facere.', '#FF00FF', 'inactive'),
+('BNT00000068', 'Type 68', 'Earum in totam.', '#FF0000', 'inactive'),
+('BNT00000069', 'Type 69', 'Aliquid eos odit asperiores deserunt occaecati.', '#FF0000', 'inactive'),
+('BNT00000070', 'Type 70', 'Nisi cumque eum et.', '#FF0000', 'inactive'),
+('BNT00000071', 'Type 71', 'Earum praesentium facere modi expedita.', '#FF0000', 'inactive'),
+('BNT00000072', 'Type 72', 'Accusamus maxime fuga laborum.', '#FF00FF', 'inactive'),
+('BNT00000073', 'Type 73', 'Ullam cum dolor magnam rerum recusandae.', '#FF00FF', 'inactive'),
+('BNT00000074', 'Type 74', 'Nostrum rerum minima minus mollitia quidem beatae.', '#FFFF00', 'inactive'),
+('BNT00000075', 'Type 75', 'Totam blanditiis consectetur accusantium expedita porro consequuntur.', '#FF0000', 'inactive'),
+('BNT00000076', 'Type 76', 'Suscipit nisi quis exercitationem quae adipisci.', '#FF0000', 'inactive'),
+('BNT00000077', 'Type 77', 'Dolore sequi consequuntur dolorem.', '#00FF00', 'inactive'),
+('BNT00000078', 'Type 78', 'Distinctio voluptatem incidunt quis.', '#0000FF', 'active'),
+('BNT00000079', 'Type 79', 'Aspernatur quo quidem aliquam.', '#FFFF00', 'active'),
+('BNT00000080', 'Type 80', 'Adipisci optio nihil iusto.', '#00FF00', 'inactive'),
+('BNT00000081', 'Type 81', 'Aliquam error ab atque commodi.', '#FF00FF', 'inactive'),
+('BNT00000082', 'Type 82', 'Dignissimos temporibus delectus expedita at sapiente velit veniam.', '#FF00FF', 'active'),
+('BNT00000083', 'Type 83', 'Explicabo sequi quos nostrum magnam architecto.', '#FFFF00', 'inactive'),
+('BNT00000084', 'Type 84', 'Quis minus quaerat vitae cupiditate quidem a quas.', '#0000FF', 'active'),
+('BNT00000085', 'Type 85', 'Ullam sed labore praesentium delectus.', '#0000FF', 'active'),
+('BNT00000086', 'Type 86', 'Debitis explicabo fugit distinctio.', '#FF0000', 'active'),
+('BNT00000087', 'Type 87', 'Illum quis et iure maxime.', '#FF00FF', 'active'),
+('BNT00000088', 'Type 88', 'Quis provident nam aliquam eveniet blanditiis eligendi.', '#0000FF', 'inactive'),
+('BNT00000089', 'Type 89', 'Quasi porro sapiente dolorem illum voluptates incidunt sequi.', '#00FF00', 'active'),
+('BNT00000090', 'Type 90', 'Vel facilis accusamus perferendis perferendis id minima.', '#FF0000', 'active'),
+('BNT00000091', 'Type 91', 'Blanditiis hic possimus voluptate.', '#0000FF', 'active'),
+('BNT00000092', 'Type 92', 'Aperiam voluptate excepturi nisi.', '#00FF00', 'active'),
+('BNT00000093', 'Type 93', 'Commodi saepe quam eius quae neque.', '#FF0000', 'active'),
+('BNT00000094', 'Type 94', 'Quidem reiciendis velit explicabo pariatur.', '#FFFF00', 'inactive'),
+('BNT00000095', 'Type 95', 'Voluptates maiores corporis iste commodi laudantium.', '#FF00FF', 'inactive'),
+('BNT00000096', 'Type 96', 'Occaecati consequatur aut amet architecto.', '#FF00FF', 'inactive'),
+('BNT00000097', 'Type 97', 'Voluptas fugit perspiciatis.', '#0000FF', 'active'),
+('BNT00000098', 'Type 98', 'Esse numquam quis optio.', '#FFFF00', 'active'),
+('BNT00000099', 'Type 99', 'Quisquam recusandae dicta optio laudantium ea exercitationem.', '#FFFF00', 'inactive'),
+('BNT00000100', 'Type 100', 'Molestias veritatis adipisci inventore totam fugit et.', '#0000FF', 'inactive');
+
+-- INSERT BIN_LOCATION
+INSERT INTO BIN_LOCATION (id, floor, description, status, bin_type_id, faculty_id, faculty_department_id) VALUES
+('LOC00000001', 10, 'Lantai 10 - Minus', 'active', 'BNT00000046', 'F005', 'FD023'),
+('LOC00000002', 5, 'Lantai 5 - Numquam', 'inactive', 'BNT00000058', 'F001', 'FD001'),
+('LOC00000003', 6, 'Lantai 6 - Officia', 'inactive', 'BNT00000010', 'F006', 'FD029'),
+('LOC00000004', 10, 'Lantai 10 - Amet', 'inactive', 'BNT00000060', 'F005', 'FD027'),
+('LOC00000005', 1, 'Lantai 1 - Aliquid', 'inactive', 'BNT00000074', 'F006', 'FD030'),
+('LOC00000006', 6, 'Lantai 6 - Dolorum', 'inactive', 'BNT00000065', 'F002', 'FD007'),
+('LOC00000007', 8, 'Lantai 8 - Quos', 'active', 'BNT00000044', 'F006', 'FD029'),
+('LOC00000008', 9, 'Lantai 9 - Unde', 'active', 'BNT00000006', 'F002', 'FD012'),
+('LOC00000009', 8, 'Lantai 8 - Incidunt', 'inactive', 'BNT00000068', 'F005', 'FD027'),
+('LOC00000010', 3, 'Lantai 3 - Voluptatibus', 'inactive', 'BNT00000048', 'F003', 'FD016'),
+('LOC00000011', 7, 'Lantai 7 - Doloremque', 'inactive', 'BNT00000087', 'F005', 'FD023'),
+('LOC00000012', 6, 'Lantai 6 - Porro', 'active', 'BNT00000043', 'F001', 'FD005'),
+('LOC00000013', 7, 'Lantai 7 - Non', 'inactive', 'BNT00000033', 'F006', 'FD034'),
+('LOC00000014', 10, 'Lantai 10 - Deleniti', 'active', 'BNT00000043', 'F001', 'FD005'),
+('LOC00000015', 3, 'Lantai 3 - Ipsa', 'inactive', 'BNT00000040', 'F006', 'FD034'),
+('LOC00000016', 7, 'Lantai 7 - Molestias', 'active', 'BNT00000077', 'F006', 'FD029'),
+('LOC00000017', 5, 'Lantai 5 - Placeat', 'inactive', 'BNT00000083', 'F007', 'FD037'),
+('LOC00000018', 3, 'Lantai 3 - Culpa', 'active', 'BNT00000083', 'F006', 'FD032'),
+('LOC00000019', 9, 'Lantai 9 - Reiciendis', 'inactive', 'BNT00000003', 'F003', 'FD015'),
+('LOC00000020', 3, 'Lantai 3 - Veniam', 'active', 'BNT00000044', 'F007', 'FD038'),
+('LOC00000021', 4, 'Lantai 4 - Porro', 'active', 'BNT00000018', 'F002', 'FD007'),
+('LOC00000022', 5, 'Lantai 5 - Unde', 'active', 'BNT00000065', 'F007', 'FD039'),
+('LOC00000023', 9, 'Lantai 9 - Quod', 'active', 'BNT00000085', 'F003', 'FD017'),
+('LOC00000024', 3, 'Lantai 3 - Vitae', 'inactive', 'BNT00000020', 'F002', 'FD008'),
+('LOC00000025', 10, 'Lantai 10 - Quis', 'active', 'BNT00000093', 'F004', 'FD019'),
+('LOC00000026', 7, 'Lantai 7 - Rem', 'inactive', 'BNT00000087', 'F006', 'FD030'),
+('LOC00000027', 8, 'Lantai 8 - Optio', 'inactive', 'BNT00000097', 'F006', 'FD032'),
+('LOC00000028', 4, 'Lantai 4 - Pariatur', 'active', 'BNT00000040', 'F007', 'FD038'),
+('LOC00000029', 4, 'Lantai 4 - Ratione', 'inactive', 'BNT00000087', 'F005', 'FD026'),
+('LOC00000030', 8, 'Lantai 8 - Dolore', 'inactive', 'BNT00000100', 'F004', 'FD022'),
+('LOC00000031', 3, 'Lantai 3 - Quae', 'active', 'BNT00000078', 'F002', 'FD009'),
+('LOC00000032', 1, 'Lantai 1 - Aspernatur', 'inactive', 'BNT00000048', 'F005', 'FD023'),
+('LOC00000033', 9, 'Lantai 9 - Mollitia', 'active', 'BNT00000037', 'F001', 'FD002'),
+('LOC00000034', 5, 'Lantai 5 - Fuga', 'inactive', 'BNT00000066', 'F002', 'FD010'),
+('LOC00000035', 2, 'Lantai 2 - Possimus', 'active', 'BNT00000058', 'F003', 'FD013'),
+('LOC00000036', 7, 'Lantai 7 - Rerum', 'active', 'BNT00000051', 'F005', 'FD025'),
+('LOC00000037', 4, 'Lantai 4 - Minus', 'inactive', 'BNT00000011', 'F003', 'FD014'),
+('LOC00000038', 1, 'Lantai 1 - Sint', 'inactive', 'BNT00000013', 'F007', 'FD040'),
+('LOC00000039', 6, 'Lantai 6 - Veritatis', 'active', 'BNT00000018', 'F001', 'FD003'),
+('LOC00000040', 8, 'Lantai 8 - Libero', 'active', 'BNT00000098', 'F006', 'FD032'),
+('LOC00000041', 8, 'Lantai 8 - Id', 'active', 'BNT00000011', 'F001', 'FD003'),
+('LOC00000042', 4, 'Lantai 4 - Iste', 'active', 'BNT00000071', 'F006', 'FD033'),
+('LOC00000043', 9, 'Lantai 9 - Assumenda', 'inactive', 'BNT00000015', 'F007', 'FD037'),
+('LOC00000044', 4, 'Lantai 4 - Aliquam', 'inactive', 'BNT00000016', 'F001', 'FD002'),
+('LOC00000045', 7, 'Lantai 7 - Rerum', 'inactive', 'BNT00000009', 'F001', 'FD004'),
+('LOC00000046', 10, 'Lantai 10 - Aperiam', 'active', 'BNT00000081', 'F005', 'FD027'),
+('LOC00000047', 4, 'Lantai 4 - Debitis', 'active', 'BNT00000038', 'F004', 'FD019'),
+('LOC00000048', 10, 'Lantai 10 - Maiores', 'inactive', 'BNT00000031', 'F005', 'FD026'),
+('LOC00000049', 3, 'Lantai 3 - Laudantium', 'active', 'BNT00000068', 'F003', 'FD013'),
+('LOC00000050', 9, 'Lantai 9 - Reprehenderit', 'active', 'BNT00000050', 'F007', 'FD038'),
+('LOC00000051', 1, 'Lantai 1 - Alias', 'inactive', 'BNT00000048', 'F003', 'FD018'),
+('LOC00000052', 1, 'Lantai 1 - Sunt', 'inactive', 'BNT00000009', 'F003', 'FD014'),
+('LOC00000053', 2, 'Lantai 2 - Laboriosam', 'inactive', 'BNT00000018', 'F001', 'FD003'),
+('LOC00000054', 9, 'Lantai 9 - Modi', 'inactive', 'BNT00000083', 'F002', 'FD012'),
+('LOC00000055', 8, 'Lantai 8 - Consequatur', 'inactive', 'BNT00000081', 'F002', 'FD008'),
+('LOC00000056', 2, 'Lantai 2 - Nobis', 'inactive', 'BNT00000005', 'F003', 'FD014'),
+('LOC00000057', 1, 'Lantai 1 - Laborum', 'active', 'BNT00000006', 'F003', 'FD015'),
+('LOC00000058', 9, 'Lantai 9 - Magnam', 'inactive', 'BNT00000070', 'F004', 'FD021'),
+('LOC00000059', 1, 'Lantai 1 - Neque', 'active', 'BNT00000037', 'F003', 'FD013'),
+('LOC00000060', 6, 'Lantai 6 - Laudantium', 'inactive', 'BNT00000016', 'F007', 'FD037'),
+('LOC00000061', 7, 'Lantai 7 - Aspernatur', 'inactive', 'BNT00000096', 'F004', 'FD022'),
+('LOC00000062', 6, 'Lantai 6 - Ut', 'active', 'BNT00000064', 'F006', 'FD032'),
+('LOC00000063', 6, 'Lantai 6 - Exercitationem', 'inactive', 'BNT00000011', 'F006', 'FD032'),
+('LOC00000064', 2, 'Lantai 2 - Expedita', 'inactive', 'BNT00000078', 'F007', 'FD036'),
+('LOC00000065', 9, 'Lantai 9 - Ex', 'inactive', 'BNT00000042', 'F001', 'FD001'),
+('LOC00000066', 6, 'Lantai 6 - Tenetur', 'inactive', 'BNT00000040', 'F004', 'FD022'),
+('LOC00000067', 3, 'Lantai 3 - Ipsa', 'inactive', 'BNT00000045', 'F004', 'FD019'),
+('LOC00000068', 6, 'Lantai 6 - Rerum', 'inactive', 'BNT00000036', 'F006', 'FD029'),
+('LOC00000069', 2, 'Lantai 2 - Blanditiis', 'inactive', 'BNT00000047', 'F005', 'FD028'),
+('LOC00000070', 3, 'Lantai 3 - Voluptas', 'active', 'BNT00000019', 'F007', 'FD039'),
+('LOC00000071', 8, 'Lantai 8 - At', 'active', 'BNT00000017', 'F001', 'FD002'),
+('LOC00000072', 6, 'Lantai 6 - Inventore', 'inactive', 'BNT00000050', 'F005', 'FD023'),
+('LOC00000073', 10, 'Lantai 10 - Cum', 'active', 'BNT00000087', 'F004', 'FD021'),
+('LOC00000074', 6, 'Lantai 6 - Labore', 'inactive', 'BNT00000098', 'F001', 'FD005'),
+('LOC00000075', 3, 'Lantai 3 - Dolores', 'inactive', 'BNT00000051', 'F003', 'FD018'),
+('LOC00000076', 5, 'Lantai 5 - Adipisci', 'active', 'BNT00000015', 'F001', 'FD006'),
+('LOC00000077', 3, 'Lantai 3 - Quidem', 'inactive', 'BNT00000067', 'F004', 'FD019'),
+('LOC00000078', 5, 'Lantai 5 - Itaque', 'inactive', 'BNT00000091', 'F004', 'FD020'),
+('LOC00000079', 10, 'Lantai 10 - Amet', 'inactive', 'BNT00000089', 'F004', 'FD020'),
+('LOC00000080', 2, 'Lantai 2 - Officia', 'active', 'BNT00000010', 'F004', 'FD020'),
+('LOC00000081', 8, 'Lantai 8 - Unde', 'active', 'BNT00000088', 'F007', 'FD037'),
+('LOC00000082', 6, 'Lantai 6 - Nisi', 'active', 'BNT00000071', 'F005', 'FD025'),
+('LOC00000083', 5, 'Lantai 5 - Reiciendis', 'active', 'BNT00000092', 'F006', 'FD034'),
+('LOC00000084', 3, 'Lantai 3 - Quam', 'inactive', 'BNT00000066', 'F002', 'FD007'),
+('LOC00000085', 4, 'Lantai 4 - Nihil', 'active', 'BNT00000031', 'F007', 'FD038'),
+('LOC00000086', 1, 'Lantai 1 - Fugiat', 'inactive', 'BNT00000071', 'F005', 'FD025'),
+('LOC00000087', 8, 'Lantai 8 - Adipisci', 'active', 'BNT00000079', 'F001', 'FD001'),
+('LOC00000088', 5, 'Lantai 5 - Voluptatem', 'inactive', 'BNT00000092', 'F006', 'FD032'),
+('LOC00000089', 9, 'Lantai 9 - Optio', 'inactive', 'BNT00000099', 'F004', 'FD019'),
+('LOC00000090', 3, 'Lantai 3 - Repudiandae', 'inactive', 'BNT00000083', 'F001', 'FD004'),
+('LOC00000091', 8, 'Lantai 8 - Adipisci', 'inactive', 'BNT00000017', 'F007', 'FD039'),
+('LOC00000092', 10, 'Lantai 10 - Ipsum', 'active', 'BNT00000099', 'F002', 'FD010'),
+('LOC00000093', 9, 'Lantai 9 - Minus', 'active', 'BNT00000016', 'F005', 'FD024'),
+('LOC00000094', 5, 'Lantai 5 - Rem', 'active', 'BNT00000021', 'F003', 'FD018'),
+('LOC00000095', 4, 'Lantai 4 - Molestias', 'inactive', 'BNT00000067', 'F003', 'FD013'),
+('LOC00000096', 5, 'Lantai 5 - Iste', 'active', 'BNT00000082', 'F005', 'FD025'),
+('LOC00000097', 3, 'Lantai 3 - Rem', 'inactive', 'BNT00000079', 'F005', 'FD023'),
+('LOC00000098', 9, 'Lantai 9 - Consequuntur', 'active', 'BNT00000076', 'F005', 'FD024'),
+('LOC00000099', 3, 'Lantai 3 - Porro', 'inactive', 'BNT00000073', 'F001', 'FD001'),
+('LOC00000100', 2, 'Lantai 2 - Consequuntur', 'active', 'BNT00000083', 'F007', 'FD039');
+
+-- INSERT RECYCLING_BIN
+INSERT INTO RECYCLING_BIN (id, capacity_kg, status, last_emptied, qr_code, bin_location_id) VALUES
+('RCB00000001', 33.82, 'available', '2025-06-15 13:16:41', 'QRRCB0001', 'LOC00000099'),
+('RCB00000002', 61.49, 'in_maintenance', '2025-06-15 13:16:33', 'QRRCB0002', 'LOC00000082'),
+('RCB00000003', 12.73, 'in_maintenance', '2025-06-15 13:12:33', 'QRRCB0003', 'LOC00000070'),
+('RCB00000004', 36.07, 'full', '2025-06-15 13:13:40', 'QRRCB0004', 'LOC00000062'),
+('RCB00000005', 32.04, 'in_maintenance', '2025-06-15 13:15:02', 'QRRCB0005', 'LOC00000052'),
+('RCB00000006', 36.77, 'available', '2025-06-15 13:15:05', 'QRRCB0006', 'LOC00000089'),
+('RCB00000007', 15.39, 'full', '2025-06-15 13:16:29', 'QRRCB0007', 'LOC00000054'),
+('RCB00000008', 53.58, 'available', '2025-06-15 13:13:41', 'QRRCB0008', 'LOC00000044'),
+('RCB00000009', 64.6, 'full', '2025-06-15 13:12:13', 'QRRCB0009', 'LOC00000092'),
+('RCB00000010', 38.74, 'full', '2025-06-15 13:16:02', 'QRRCB0010', 'LOC00000052'),
+('RCB00000011', 21.77, 'full', '2025-06-15 13:13:21', 'QRRCB0011', 'LOC00000066'),
+('RCB00000012', 60.55, 'full', '2025-06-15 13:13:54', 'QRRCB0012', 'LOC00000031'),
+('RCB00000013', 51.98, 'full', '2025-06-15 13:14:31', 'QRRCB0013', 'LOC00000058'),
+('RCB00000014', 32.31, 'available', '2025-06-15 13:12:31', 'QRRCB0014', 'LOC00000007'),
+('RCB00000015', 36.12, 'full', '2025-06-15 13:15:02', 'QRRCB0015', 'LOC00000079'),
+('RCB00000016', 47.63, 'available', '2025-06-15 13:16:13', 'QRRCB0016', 'LOC00000042'),
+('RCB00000017', 94.04, 'in_maintenance', '2025-06-15 13:11:26', 'QRRCB0017', 'LOC00000041'),
+('RCB00000018', 27.09, 'available', '2025-06-15 13:15:22', 'QRRCB0018', 'LOC00000064'),
+('RCB00000019', 99.64, 'full', '2025-06-15 13:12:37', 'QRRCB0019', 'LOC00000064'),
+('RCB00000020', 89.12, 'full', '2025-06-15 13:13:15', 'QRRCB0020', 'LOC00000003'),
+('RCB00000021', 18.1, 'full', '2025-06-15 13:13:03', 'QRRCB0021', 'LOC00000065'),
+('RCB00000022', 51.15, 'available', '2025-06-15 13:11:12', 'QRRCB0022', 'LOC00000028'),
+('RCB00000023', 62.5, 'available', '2025-06-15 13:13:20', 'QRRCB0023', 'LOC00000007'),
+('RCB00000024', 35.32, 'in_maintenance', '2025-06-15 13:15:41', 'QRRCB0024', 'LOC00000084'),
+('RCB00000025', 70.53, 'full', '2025-06-15 13:14:13', 'QRRCB0025', 'LOC00000069'),
+('RCB00000026', 10.74, 'available', '2025-06-15 13:12:43', 'QRRCB0026', 'LOC00000056'),
+('RCB00000027', 22.05, 'full', '2025-06-15 13:16:07', 'QRRCB0027', 'LOC00000094'),
+('RCB00000028', 42.92, 'full', '2025-06-15 13:11:35', 'QRRCB0028', 'LOC00000047'),
+('RCB00000029', 14.07, 'available', '2025-06-15 13:15:44', 'QRRCB0029', 'LOC00000073'),
+('RCB00000030', 60.56, 'full', '2025-06-15 13:11:36', 'QRRCB0030', 'LOC00000071'),
+('RCB00000031', 35.97, 'full', '2025-06-15 13:15:51', 'QRRCB0031', 'LOC00000065'),
+('RCB00000032', 50.53, 'in_maintenance', '2025-06-15 13:13:40', 'QRRCB0032', 'LOC00000036'),
+('RCB00000033', 84.28, 'in_maintenance', '2025-06-15 13:13:07', 'QRRCB0033', 'LOC00000088'),
+('RCB00000034', 64.99, 'available', '2025-06-15 13:11:22', 'QRRCB0034', 'LOC00000013'),
+('RCB00000035', 45.45, 'full', '2025-06-15 13:15:38', 'QRRCB0035', 'LOC00000072'),
+('RCB00000036', 94.51, 'available', '2025-06-15 13:15:19', 'QRRCB0036', 'LOC00000026'),
+('RCB00000037', 64.22, 'full', '2025-06-15 13:14:51', 'QRRCB0037', 'LOC00000065'),
+('RCB00000038', 13.62, 'available', '2025-06-15 13:14:26', 'QRRCB0038', 'LOC00000018'),
+('RCB00000039', 74.22, 'full', '2025-06-15 13:12:35', 'QRRCB0039', 'LOC00000067'),
+('RCB00000040', 51.13, 'in_maintenance', '2025-06-15 13:13:45', 'QRRCB0040', 'LOC00000066'),
+('RCB00000041', 22.58, 'in_maintenance', '2025-06-15 13:11:27', 'QRRCB0041', 'LOC00000041'),
+('RCB00000042', 24.63, 'in_maintenance', '2025-06-15 13:16:21', 'QRRCB0042', 'LOC00000095'),
+('RCB00000043', 85.83, 'in_maintenance', '2025-06-15 13:13:22', 'QRRCB0043', 'LOC00000044'),
+('RCB00000044', 55.66, 'in_maintenance', '2025-06-15 13:15:06', 'QRRCB0044', 'LOC00000069'),
+('RCB00000045', 54.09, 'in_maintenance', '2025-06-15 13:13:21', 'QRRCB0045', 'LOC00000039'),
+('RCB00000046', 52.74, 'available', '2025-06-15 13:14:29', 'QRRCB0046', 'LOC00000048'),
+('RCB00000047', 39.81, 'available', '2025-06-15 13:16:27', 'QRRCB0047', 'LOC00000054'),
+('RCB00000048', 62.53, 'in_maintenance', '2025-06-15 13:15:24', 'QRRCB0048', 'LOC00000089'),
+('RCB00000049', 66.63, 'in_maintenance', '2025-06-15 13:13:28', 'QRRCB0049', 'LOC00000061'),
+('RCB00000050', 33.9, 'in_maintenance', '2025-06-15 13:12:30', 'QRRCB0050', 'LOC00000100'),
+('RCB00000051', 62.06, 'available', '2025-06-15 13:14:20', 'QRRCB0051', 'LOC00000093'),
+('RCB00000052', 14.62, 'full', '2025-06-15 13:14:13', 'QRRCB0052', 'LOC00000022'),
+('RCB00000053', 57.18, 'in_maintenance', '2025-06-15 13:12:56', 'QRRCB0053', 'LOC00000080'),
+('RCB00000054', 79.71, 'full', '2025-06-15 13:16:07', 'QRRCB0054', 'LOC00000019'),
+('RCB00000055', 83.95, 'available', '2025-06-15 13:15:11', 'QRRCB0055', 'LOC00000005'),
+('RCB00000056', 61.53, 'in_maintenance', '2025-06-15 13:14:40', 'QRRCB0056', 'LOC00000015'),
+('RCB00000057', 27.17, 'full', '2025-06-15 13:16:31', 'QRRCB0057', 'LOC00000041'),
+('RCB00000058', 47.69, 'full', '2025-06-15 13:15:28', 'QRRCB0058', 'LOC00000089'),
+('RCB00000059', 28.35, 'in_maintenance', '2025-06-15 13:12:20', 'QRRCB0059', 'LOC00000100'),
+('RCB00000060', 65.03, 'full', '2025-06-15 13:10:57', 'QRRCB0060', 'LOC00000095'),
+('RCB00000061', 75.47, 'in_maintenance', '2025-06-15 13:16:09', 'QRRCB0061', 'LOC00000018'),
+('RCB00000062', 56.68, 'in_maintenance', '2025-06-15 13:16:48', 'QRRCB0062', 'LOC00000042'),
+('RCB00000063', 99.83, 'full', '2025-06-15 13:15:12', 'QRRCB0063', 'LOC00000068'),
+('RCB00000064', 43.91, 'available', '2025-06-15 13:12:23', 'QRRCB0064', 'LOC00000059'),
+('RCB00000065', 92.09, 'full', '2025-06-15 13:15:43', 'QRRCB0065', 'LOC00000070'),
+('RCB00000066', 41.89, 'in_maintenance', '2025-06-15 13:15:03', 'QRRCB0066', 'LOC00000088'),
+('RCB00000067', 67.9, 'in_maintenance', '2025-06-15 13:12:37', 'QRRCB0067', 'LOC00000034'),
+('RCB00000068', 64.91, 'available', '2025-06-15 13:16:26', 'QRRCB0068', 'LOC00000032'),
+('RCB00000069', 35.11, 'full', '2025-06-15 13:14:47', 'QRRCB0069', 'LOC00000029'),
+('RCB00000070', 94.73, 'full', '2025-06-15 13:13:05', 'QRRCB0070', 'LOC00000099'),
+('RCB00000071', 36.01, 'available', '2025-06-15 13:16:14', 'QRRCB0071', 'LOC00000089'),
+('RCB00000072', 73.45, 'full', '2025-06-15 13:15:20', 'QRRCB0072', 'LOC00000062'),
+('RCB00000073', 41.39, 'in_maintenance', '2025-06-15 13:16:02', 'QRRCB0073', 'LOC00000036'),
+('RCB00000074', 35.9, 'in_maintenance', '2025-06-15 13:14:30', 'QRRCB0074', 'LOC00000087'),
+('RCB00000075', 58.89, 'full', '2025-06-15 13:15:37', 'QRRCB0075', 'LOC00000045'),
+('RCB00000076', 95.91, 'available', '2025-06-15 13:16:08', 'QRRCB0076', 'LOC00000038'),
+('RCB00000077', 13.79, 'in_maintenance', '2025-06-15 13:11:18', 'QRRCB0077', 'LOC00000011'),
+('RCB00000078', 41.17, 'full', '2025-06-15 13:15:15', 'QRRCB0078', 'LOC00000084'),
+('RCB00000079', 33.08, 'full', '2025-06-15 13:12:30', 'QRRCB0079', 'LOC00000028'),
+('RCB00000080', 28.19, 'in_maintenance', '2025-06-15 13:13:54', 'QRRCB0080', 'LOC00000035'),
+('RCB00000081', 93.97, 'in_maintenance', '2025-06-15 13:14:44', 'QRRCB0081', 'LOC00000035'),
+('RCB00000082', 22.35, 'in_maintenance', '2025-06-15 13:12:03', 'QRRCB0082', 'LOC00000095'),
+('RCB00000083', 62.81, 'available', '2025-06-15 13:12:51', 'QRRCB0083', 'LOC00000007'),
+('RCB00000084', 70.29, 'in_maintenance', '2025-06-15 13:12:05', 'QRRCB0084', 'LOC00000029'),
+('RCB00000085', 67.42, 'available', '2025-06-15 13:16:38', 'QRRCB0085', 'LOC00000013'),
+('RCB00000086', 47.2, 'in_maintenance', '2025-06-15 13:13:21', 'QRRCB0086', 'LOC00000061'),
+('RCB00000087', 19.05, 'available', '2025-06-15 13:14:30', 'QRRCB0087', 'LOC00000001'),
+('RCB00000088', 96.81, 'available', '2025-06-15 13:14:18', 'QRRCB0088', 'LOC00000053'),
+('RCB00000089', 68.76, 'full', '2025-06-15 13:13:31', 'QRRCB0089', 'LOC00000062'),
+('RCB00000090', 68.55, 'full', '2025-06-15 13:11:20', 'QRRCB0090', 'LOC00000042'),
+('RCB00000091', 35.69, 'available', '2025-06-15 13:16:12', 'QRRCB0091', 'LOC00000099'),
+('RCB00000092', 18.05, 'in_maintenance', '2025-06-15 13:12:32', 'QRRCB0092', 'LOC00000030'),
+('RCB00000093', 58.16, 'in_maintenance', '2025-06-15 13:14:19', 'QRRCB0093', 'LOC00000005'),
+('RCB00000094', 92.19, 'available', '2025-06-15 13:13:04', 'QRRCB0094', 'LOC00000054'),
+('RCB00000095', 89.4, 'available', '2025-06-15 13:13:14', 'QRRCB0095', 'LOC00000005'),
+('RCB00000096', 99.75, 'full', '2025-06-15 13:16:18', 'QRRCB0096', 'LOC00000064'),
+('RCB00000097', 26.77, 'in_maintenance', '2025-06-15 13:12:10', 'QRRCB0097', 'LOC00000038'),
+('RCB00000098', 88.91, 'available', '2025-06-15 13:12:59', 'QRRCB0098', 'LOC00000039'),
+('RCB00000099', 61.12, 'available', '2025-06-15 13:16:39', 'QRRCB0099', 'LOC00000043'),
+('RCB00000100', 35.61, 'in_maintenance', '2025-06-15 13:15:55', 'QRRCB0100', 'LOC00000070');
+
+-- INSERT STAFF_RECYCLING_BIN
+INSERT INTO STAFF_RECYCLING_BIN (id, assignment_date, status, recycling_bin_id, staff_id) VALUES
+('SRB00000001', '2024-09-15 00:24:34', 'completed', 'RCB00000018', 'STF00000065'),
+('SRB00000002', '2024-11-19 22:27:53', 'completed', 'RCB00000035', 'STF00000025'),
+('SRB00000003', '2024-09-15 22:20:47', 'assigned', 'RCB00000043', 'STF00000021'),
+('SRB00000004', '2024-07-29 09:57:45', 'completed', 'RCB00000083', 'STF00000033'),
+('SRB00000005', '2024-08-12 13:16:10', 'assigned', 'RCB00000002', 'STF00000095'),
+('SRB00000006', '2024-08-28 20:18:24', 'completed', 'RCB00000038', 'STF00000073'),
+('SRB00000007', '2024-06-26 01:44:29', 'assigned', 'RCB00000023', 'STF00000079'),
+('SRB00000008', '2024-09-18 16:33:11', 'completed', 'RCB00000055', 'STF00000066'),
+('SRB00000009', '2025-04-20 20:30:56', 'completed', 'RCB00000012', 'STF00000052'),
+('SRB00000010', '2025-05-02 13:51:05', 'assigned', 'RCB00000024', 'STF00000018'),
+('SRB00000011', '2024-10-13 21:58:04', 'completed', 'RCB00000042', 'STF00000032'),
+('SRB00000012', '2024-12-12 13:48:07', 'assigned', 'RCB00000034', 'STF00000050'),
+('SRB00000013', '2024-12-20 19:36:41', 'assigned', 'RCB00000058', 'STF00000097'),
+('SRB00000014', '2025-01-18 17:28:02', 'completed', 'RCB00000043', 'STF00000039'),
+('SRB00000015', '2024-12-01 16:34:24', 'assigned', 'RCB00000034', 'STF00000084'),
+('SRB00000016', '2024-11-26 05:01:24', 'completed', 'RCB00000089', 'STF00000031'),
+('SRB00000017', '2025-02-21 13:16:13', 'assigned', 'RCB00000086', 'STF00000016'),
+('SRB00000018', '2025-06-02 00:50:32', 'completed', 'RCB00000040', 'STF00000021'),
+('SRB00000019', '2024-06-29 16:25:11', 'completed', 'RCB00000088', 'STF00000065'),
+('SRB00000020', '2024-09-01 18:12:28', 'completed', 'RCB00000089', 'STF00000016'),
+('SRB00000021', '2024-08-16 04:50:55', 'completed', 'RCB00000048', 'STF00000079'),
+('SRB00000022', '2024-09-29 05:22:47', 'assigned', 'RCB00000029', 'STF00000018'),
+('SRB00000023', '2024-08-07 07:08:44', 'completed', 'RCB00000020', 'STF00000059'),
+('SRB00000024', '2024-06-26 15:08:30', 'completed', 'RCB00000054', 'STF00000090'),
+('SRB00000025', '2024-09-23 15:57:11', 'completed', 'RCB00000097', 'STF00000069'),
+('SRB00000026', '2025-04-17 23:46:34', 'assigned', 'RCB00000098', 'STF00000032'),
+('SRB00000027', '2025-04-23 09:02:19', 'assigned', 'RCB00000068', 'STF00000058'),
+('SRB00000028', '2024-10-01 04:32:33', 'completed', 'RCB00000010', 'STF00000073'),
+('SRB00000029', '2025-02-26 02:46:33', 'assigned', 'RCB00000008', 'STF00000071'),
+('SRB00000030', '2025-01-15 04:28:22', 'assigned', 'RCB00000074', 'STF00000069'),
+('SRB00000031', '2024-08-22 15:49:16', 'assigned', 'RCB00000022', 'STF00000042'),
+('SRB00000032', '2025-02-20 12:46:25', 'completed', 'RCB00000015', 'STF00000088'),
+('SRB00000033', '2025-05-12 09:35:30', 'assigned', 'RCB00000092', 'STF00000075'),
+('SRB00000034', '2024-07-01 17:09:15', 'completed', 'RCB00000012', 'STF00000066'),
+('SRB00000035', '2025-03-22 21:27:56', 'completed', 'RCB00000008', 'STF00000059'),
+('SRB00000036', '2024-12-20 23:53:43', 'assigned', 'RCB00000066', 'STF00000054'),
+('SRB00000037', '2025-04-15 02:28:01', 'completed', 'RCB00000073', 'STF00000008'),
+('SRB00000038', '2024-06-23 01:04:58', 'completed', 'RCB00000087', 'STF00000040'),
+('SRB00000039', '2024-07-06 19:12:27', 'assigned', 'RCB00000051', 'STF00000033'),
+('SRB00000040', '2025-05-15 03:25:24', 'assigned', 'RCB00000096', 'STF00000028'),
+('SRB00000041', '2025-05-29 11:33:24', 'assigned', 'RCB00000006', 'STF00000055'),
+('SRB00000042', '2024-07-17 21:48:00', 'completed', 'RCB00000090', 'STF00000009'),
+('SRB00000043', '2024-10-15 05:19:28', 'assigned', 'RCB00000009', 'STF00000061'),
+('SRB00000044', '2025-02-03 22:50:09', 'assigned', 'RCB00000037', 'STF00000053'),
+('SRB00000045', '2024-10-09 00:53:13', 'assigned', 'RCB00000099', 'STF00000018'),
+('SRB00000046', '2025-05-18 02:08:48', 'completed', 'RCB00000048', 'STF00000049'),
+('SRB00000047', '2024-07-10 00:08:39', 'completed', 'RCB00000049', 'STF00000049'),
+('SRB00000048', '2025-05-31 01:29:10', 'assigned', 'RCB00000088', 'STF00000085'),
+('SRB00000049', '2024-11-20 09:05:55', 'assigned', 'RCB00000084', 'STF00000045'),
+('SRB00000050', '2025-05-29 14:03:08', 'assigned', 'RCB00000023', 'STF00000069'),
+('SRB00000051', '2024-11-03 10:58:21', 'completed', 'RCB00000068', 'STF00000017'),
+('SRB00000052', '2025-03-03 03:57:26', 'assigned', 'RCB00000001', 'STF00000097'),
+('SRB00000053', '2025-02-25 15:13:02', 'assigned', 'RCB00000039', 'STF00000060'),
+('SRB00000054', '2025-05-25 07:01:21', 'completed', 'RCB00000069', 'STF00000049'),
+('SRB00000055', '2024-07-20 09:14:08', 'assigned', 'RCB00000032', 'STF00000059'),
+('SRB00000056', '2024-11-16 10:50:59', 'completed', 'RCB00000020', 'STF00000036'),
+('SRB00000057', '2025-05-07 11:07:15', 'assigned', 'RCB00000093', 'STF00000098'),
+('SRB00000058', '2025-03-23 13:52:27', 'assigned', 'RCB00000005', 'STF00000085'),
+('SRB00000059', '2025-05-08 14:31:18', 'completed', 'RCB00000079', 'STF00000099'),
+('SRB00000060', '2024-08-08 21:38:08', 'assigned', 'RCB00000031', 'STF00000027'),
+('SRB00000061', '2024-09-14 23:34:58', 'assigned', 'RCB00000013', 'STF00000077'),
+('SRB00000062', '2024-07-28 18:48:18', 'assigned', 'RCB00000058', 'STF00000077'),
+('SRB00000063', '2025-01-23 01:22:39', 'assigned', 'RCB00000032', 'STF00000095'),
+('SRB00000064', '2025-03-27 13:22:24', 'assigned', 'RCB00000052', 'STF00000057'),
+('SRB00000065', '2024-12-26 14:10:27', 'assigned', 'RCB00000070', 'STF00000028'),
+('SRB00000066', '2025-06-12 15:06:31', 'assigned', 'RCB00000018', 'STF00000065'),
+('SRB00000067', '2024-08-01 03:59:26', 'completed', 'RCB00000030', 'STF00000094'),
+('SRB00000068', '2025-01-04 00:31:01', 'completed', 'RCB00000074', 'STF00000077'),
+('SRB00000069', '2025-02-28 06:28:20', 'completed', 'RCB00000031', 'STF00000039'),
+('SRB00000070', '2025-05-03 06:11:18', 'assigned', 'RCB00000085', 'STF00000067'),
+('SRB00000071', '2025-01-26 17:25:26', 'assigned', 'RCB00000053', 'STF00000039'),
+('SRB00000072', '2025-04-12 08:07:24', 'completed', 'RCB00000008', 'STF00000072'),
+('SRB00000073', '2025-06-12 02:14:51', 'assigned', 'RCB00000081', 'STF00000087'),
+('SRB00000074', '2025-01-05 07:17:57', 'completed', 'RCB00000072', 'STF00000064'),
+('SRB00000075', '2024-09-21 02:32:28', 'assigned', 'RCB00000045', 'STF00000083'),
+('SRB00000076', '2024-12-25 02:46:46', 'completed', 'RCB00000068', 'STF00000041'),
+('SRB00000077', '2025-05-24 20:15:43', 'completed', 'RCB00000053', 'STF00000020'),
+('SRB00000078', '2024-07-20 08:41:58', 'completed', 'RCB00000049', 'STF00000024'),
+('SRB00000079', '2024-09-15 18:33:25', 'completed', 'RCB00000031', 'STF00000029'),
+('SRB00000080', '2025-02-03 06:15:35', 'completed', 'RCB00000091', 'STF00000019'),
+('SRB00000081', '2024-08-01 19:13:21', 'completed', 'RCB00000008', 'STF00000072'),
+('SRB00000082', '2025-04-11 14:10:52', 'completed', 'RCB00000054', 'STF00000072'),
+('SRB00000083', '2025-04-24 14:23:24', 'assigned', 'RCB00000050', 'STF00000032'),
+('SRB00000084', '2024-10-15 00:42:57', 'completed', 'RCB00000027', 'STF00000043'),
+('SRB00000085', '2024-10-21 04:41:13', 'assigned', 'RCB00000058', 'STF00000048'),
+('SRB00000086', '2025-05-04 13:26:12', 'assigned', 'RCB00000069', 'STF00000093'),
+('SRB00000087', '2025-01-28 05:50:06', 'assigned', 'RCB00000007', 'STF00000035'),
+('SRB00000088', '2025-03-28 15:03:39', 'completed', 'RCB00000087', 'STF00000078'),
+('SRB00000089', '2024-11-13 18:07:25', 'assigned', 'RCB00000010', 'STF00000025'),
+('SRB00000090', '2025-04-24 06:30:29', 'assigned', 'RCB00000062', 'STF00000027'),
+('SRB00000091', '2025-04-01 22:52:24', 'completed', 'RCB00000039', 'STF00000002'),
+('SRB00000092', '2025-03-31 05:43:12', 'assigned', 'RCB00000025', 'STF00000095'),
+('SRB00000093', '2024-09-14 22:37:20', 'assigned', 'RCB00000096', 'STF00000097'),
+('SRB00000094', '2025-06-13 15:00:46', 'completed', 'RCB00000032', 'STF00000090'),
+('SRB00000095', '2024-11-26 12:56:41', 'assigned', 'RCB00000051', 'STF00000031'),
+('SRB00000096', '2024-09-07 23:30:19', 'completed', 'RCB00000100', 'STF00000037'),
+('SRB00000097', '2024-08-10 08:17:15', 'completed', 'RCB00000060', 'STF00000069'),
+('SRB00000098', '2024-07-26 19:05:55', 'completed', 'RCB00000040', 'STF00000034'),
+('SRB00000099', '2024-08-22 08:04:33', 'completed', 'RCB00000066', 'STF00000064'),
+('SRB00000100', '2024-09-06 11:09:25', 'completed', 'RCB00000013', 'STF00000093');
+
+-- DUMMY DATA FOR TABLE: ADMIN
+INSERT INTO ADMIN (id, name, email, address, phone, status) VALUES
+('ADM00000001', 'Admin Satu', 'admin1@example.com', 'Jl. Admin No. 1', '081234567890', 'active'),
+('ADM00000002', 'Admin Dua', 'admin2@example.com', 'Jl. Admin No. 2', '081234567891', 'active'),
+('ADM00000003', 'Admin Tiga', 'admin3@example.com', 'Jl. Admin No. 3', '081234567892', 'active'),
+('ADM00000004', 'Admin Empat', 'admin4@example.com', 'Jl. Admin No. 4', '081234567893', 'inactive'),
+('ADM00000005', 'Admin Lima', 'admin5@example.com', 'Jl. Admin No. 5', '081234567894', 'active'),
+('ADM00000006', 'Admin Enam', 'admin6@example.com', 'Jl. Admin No. 6', '081234567895', 'active'),
+('ADM00000007', 'Admin Tujuh', 'admin7@example.com', 'Jl. Admin No. 7', '081234567896', 'active'),
+('ADM00000008', 'Admin Delapan', 'admin8@example.com', 'Jl. Admin No. 8', '081234567897', 'inactive'),
+('ADM00000009', 'Admin Sembilan', 'admin9@example.com', 'Jl. Admin No. 9', '081234567898', 'active'),
+('ADM00000010', 'Admin Sepuluh', 'admin10@example.com', 'Jl. Admin No. 10', '081234567899', 'active'),
+('ADM00000011', 'Admin Sebelas', 'admin11@example.com', 'Jl. Admin No. 11', '081234567900', 'active'),
+('ADM00000012', 'Admin Duabelas', 'admin12@example.com', 'Jl. Admin No. 12', '081234567901', 'active'),
+('ADM00000013', 'Admin Tigabelas', 'admin13@example.com', 'Jl. Admin No. 13', '081234567902', 'inactive'),
+('ADM00000014', 'Admin Empatbelas', 'admin14@example.com', 'Jl. Admin No. 14', '081234567903', 'active'),
+('ADM00000015', 'Admin Limabelas', 'admin15@example.com', 'Jl. Admin No. 15', '081234567904', 'active'),
+('ADM00000016', 'Admin Enambelas', 'admin16@example.com', 'Jl. Admin No. 16', '081234567905', 'active'),
+('ADM00000017', 'Admin Tujuhbelas', 'admin17@example.com', 'Jl. Admin No. 17', '081234567906', 'active'),
+('ADM00000018', 'Admin Delapanbelas', 'admin18@example.com', 'Jl. Admin No. 18', '081234567907', 'inactive'),
+('ADM00000019', 'Admin Sembilanbelas', 'admin19@example.com', 'Jl. Admin No. 19', '081234567908', 'active'),
+('ADM00000020', 'Admin Duapuluh', 'admin20@example.com', 'Jl. Admin No. 20', '081234567909', 'active'),
+('ADM00000021', 'Admin Duapuluhsatu', 'admin21@example.com', 'Jl. Admin No. 21', '081234567910', 'active'),
+('ADM00000022', 'Admin Duapuluhdua', 'admin22@example.com', 'Jl. Admin No. 22', '081234567911', 'inactive'),
+('ADM00000023', 'Admin Duapuluhtiga', 'admin23@example.com', 'Jl. Admin No. 23', '081234567912', 'active'),
+('ADM00000024', 'Admin Duapuluhempat', 'admin24@example.com', 'Jl. Admin No. 24', '081234567913', 'active'),
+('ADM00000025', 'Admin Duapuluhlima', 'admin25@example.com', 'Jl. Admin No. 25', '081234567914', 'active'),
+('ADM00000026', 'Admin Duapuluhenam', 'admin26@example.com', 'Jl. Admin No. 26', '081234567915', 'active'),
+('ADM00000027', 'Admin Duapuluhtujuh', 'admin27@example.com', 'Jl. Admin No. 27', '081234567916', 'inactive'),
+('ADM00000028', 'Admin Duapuluhdelapan', 'admin28@example.com', 'Jl. Admin No. 28', '081234567917', 'active'),
+('ADM00000029', 'Admin Duapuluhsembilan', 'admin29@example.com', 'Jl. Admin No. 29', '081234567918', 'active'),
+('ADM00000030', 'Admin Tigapuluh', 'admin30@example.com', 'Jl. Admin No. 30', '081234567919', 'active'),
+('ADM00000031', 'Admin Tigapuluhsatu', 'admin31@example.com', 'Jl. Admin No. 31', '081234567920', 'active'),
+('ADM00000032', 'Admin Tigapuluhdua', 'admin32@example.com', 'Jl. Admin No. 32', '081234567921', 'inactive'),
+('ADM00000033', 'Admin Tigapuluhtiga', 'admin33@example.com', 'Jl. Admin No. 33', '081234567922', 'active'),
+('ADM00000034', 'Admin Tigapuluhempat', 'admin34@example.com', 'Jl. Admin No. 34', '081234567923', 'active'),
+('ADM00000035', 'Admin Tigapuluhlima', 'admin35@example.com', 'Jl. Admin No. 35', '081234567924', 'active'),
+('ADM00000036', 'Admin Tigapuluhenam', 'admin36@example.com', 'Jl. Admin No. 36', '081234567925', 'active'),
+('ADM00000037', 'Admin Tigapuluhtujuh', 'admin37@example.com', 'Jl. Admin No. 37', '081234567926', 'inactive'),
+('ADM00000038', 'Admin Tigapuluhdelapan', 'admin38@example.com', 'Jl. Admin No. 38', '081234567927', 'active'),
+('ADM00000039', 'Admin Tigapuluhsembilan', 'admin39@example.com', 'Jl. Admin No. 39', '081234567928', 'active'),
+('ADM00000040', 'Admin Empatpuluh', 'admin40@example.com', 'Jl. Admin No. 40', '081234567929', 'active'),
+('ADM00000041', 'Admin Empatpuluhsatu', 'admin41@example.com', 'Jl. Admin No. 41', '081234567930', 'active'),
+('ADM00000042', 'Admin Empatpuluhdua', 'admin42@example.com', 'Jl. Admin No. 42', '081234567931', 'inactive'),
+('ADM00000043', 'Admin Empatpuluhtiga', 'admin43@example.com', 'Jl. Admin No. 43', '081234567932', 'active'),
+('ADM00000044', 'Admin Empatpuluhempat', 'admin44@example.com', 'Jl. Admin No. 44', '081234567933', 'active'),
+('ADM00000045', 'Admin Empatpuluhlima', 'admin45@example.com', 'Jl. Admin No. 45', '081234567934', 'active'),
+('ADM00000046', 'Admin Empatpuluhenam', 'admin46@example.com', 'Jl. Admin No. 46', '081234567935', 'active'),
+('ADM00000047', 'Admin Empatpuluhtujuh', 'admin47@example.com', 'Jl. Admin No. 47', '081234567936', 'inactive'),
+('ADM00000048', 'Admin Empatpuluhdelapan', 'admin48@example.com', 'Jl. Admin No. 48', '081234567937', 'active'),
+('ADM00000049', 'Admin Empatpuluhsembilan', 'admin49@example.com', 'Jl. Admin No. 49', '081234567938', 'active'),
+('ADM00000050', 'Admin Limapuluh', 'admin50@example.com', 'Jl. Admin No. 50', '081234567939', 'active'),
+('ADM00000051', 'Admin Limapuluhsatu', 'admin51@example.com', 'Jl. Admin No. 51', '081234567940', 'active'),
+('ADM00000052', 'Admin Limapuluhdua', 'admin52@example.com', 'Jl. Admin No. 52', '081234567941', 'inactive'),
+('ADM00000053', 'Admin Limapuluhtiga', 'admin53@example.com', 'Jl. Admin No. 53', '081234567942', 'active'),
+('ADM00000054', 'Admin Limapuluhempat', 'admin54@example.com', 'Jl. Admin No. 54', '081234567943', 'active'),
+('ADM00000055', 'Admin Limapuluhlima', 'admin55@example.com', 'Jl. Admin No. 55', '081234567944', 'active'),
+('ADM00000056', 'Admin Limapuluhenam', 'admin56@example.com', 'Jl. Admin No. 56', '081234567945', 'active'),
+('ADM00000057', 'Admin Limapuluhtujuh', 'admin57@example.com', 'Jl. Admin No. 57', '081234567946', 'inactive'),
+('ADM00000058', 'Admin Limapuluhdelapan', 'admin58@example.com', 'Jl. Admin No. 58', '081234567947', 'active'),
+('ADM00000059', 'Admin Limapuluhsembilan', 'admin59@example.com', 'Jl. Admin No. 59', '081234567948', 'active'),
+('ADM00000060', 'Admin Enampuluh', 'admin60@example.com', 'Jl. Admin No. 60', '081234567949', 'active'),
+('ADM00000061', 'Admin Enampuluhsatu', 'admin61@example.com', 'Jl. Admin No. 61', '081234567950', 'active'),
+('ADM00000062', 'Admin Enampuluhdua', 'admin62@example.com', 'Jl. Admin No. 62', '081234567951', 'inactive'),
+('ADM00000063', 'Admin Enampuluhtiga', 'admin63@example.com', 'Jl. Admin No. 63', '081234567952', 'active'),
+('ADM00000064', 'Admin Enampuluhempat', 'admin64@example.com', 'Jl. Admin No. 64', '081234567953', 'active'),
+('ADM00000065', 'Admin Enampuluhlima', 'admin65@example.com', 'Jl. Admin No. 65', '081234567954', 'active'),
+('ADM00000066', 'Admin Enampuluhenam', 'admin66@example.com', 'Jl. Admin No. 66', '081234567955', 'active'),
+('ADM00000067', 'Admin Enampuluhtujuh', 'admin67@example.com', 'Jl. Admin No. 67', '081234567956', 'inactive'),
+('ADM00000068', 'Admin Enampuluhdelapan', 'admin68@example.com', 'Jl. Admin No. 68', '081234567957', 'active'),
+('ADM00000069', 'Admin Enampuluhsembilan', 'admin69@example.com', 'Jl. Admin No. 69', '081234567958', 'active'),
+('ADM00000070', 'Admin Tujuhpuluh', 'admin70@example.com', 'Jl. Admin No. 70', '081234567959', 'active'),
+('ADM00000071', 'Admin Tujuhpuluhsatu', 'admin71@example.com', 'Jl. Admin No. 71', '081234567960', 'active'),
+('ADM00000072', 'Admin Tujuhpuluhdua', 'admin72@example.com', 'Jl. Admin No. 72', '081234567961', 'inactive'),
+('ADM00000073', 'Admin Tujuhpuluhtiga', 'admin73@example.com', 'Jl. Admin No. 73', '081234567962', 'active'),
+('ADM00000074', 'Admin Tujuhpuluhempat', 'admin74@example.com', 'Jl. Admin No. 74', '081234567963', 'active'),
+('ADM00000075', 'Admin Tujuhpuluhlima', 'admin75@example.com', 'Jl. Admin No. 75', '081234567964', 'active'),
+('ADM00000076', 'Admin Tujuhpuluhenam', 'admin76@example.com', 'Jl. Admin No. 76', '081234567965', 'active'),
+('ADM00000077', 'Admin Tujuhpuluhtujuh', 'admin77@example.com', 'Jl. Admin No. 77', '081234567966', 'inactive'),
+('ADM00000078', 'Admin Tujuhpuluhdelapan', 'admin78@example.com', 'Jl. Admin No. 78', '081234567967', 'active'),
+('ADM00000079', 'Admin Tujuhpuluhsembilan', 'admin79@example.com', 'Jl. Admin No. 79', '081234567968', 'active'),
+('ADM00000080', 'Admin Delapanpuluh', 'admin80@example.com', 'Jl. Admin No. 80', '081234567969', 'active'),
+('ADM00000081', 'Admin Delapanpuluhsatu', 'admin81@example.com', 'Jl. Admin No. 81', '081234567970', 'active'),
+('ADM00000082', 'Admin Delapanpuluhdua', 'admin82@example.com', 'Jl. Admin No. 82', '081234567971', 'inactive'),
+('ADM00000083', 'Admin Delapanpuluhtiga', 'admin83@example.com', 'Jl. Admin No. 83', '081234567972', 'active'),
+('ADM00000084', 'Admin Delapanpuluhempat', 'admin84@example.com', 'Jl. Admin No. 84', '081234567973', 'active'),
+('ADM00000085', 'Admin Delapanpuluhlima', 'admin85@example.com', 'Jl. Admin No. 85', '081234567974', 'active'),
+('ADM00000086', 'Admin Delapanpuluhenam', 'admin86@example.com', 'Jl. Admin No. 86', '081234567975', 'active'),
+('ADM00000087', 'Admin Delapanpuluhtujuh', 'admin87@example.com', 'Jl. Admin No. 87', '081234567976', 'inactive'),
+('ADM00000088', 'Admin Delapanpuluhdelapan', 'admin88@example.com', 'Jl. Admin No. 88', '081234567977', 'active'),
+('ADM00000089', 'Admin Delapanpuluhsembilan', 'admin89@example.com', 'Jl. Admin No. 89', '081234567978', 'active'),
+('ADM00000090', 'Admin Sembilanpuluh', 'admin90@example.com', 'Jl. Admin No. 90', '081234567979', 'active'),
+('ADM00000091', 'Admin Sembilanpuluhsatu', 'admin91@example.com', 'Jl. Admin No. 91', '081234567980', 'active'),
+('ADM00000092', 'Admin Sembilanpuluhdua', 'admin92@example.com', 'Jl. Admin No. 92', '081234567981', 'inactive'),
+('ADM00000093', 'Admin Sembilanpuluhtiga', 'admin93@example.com', 'Jl. Admin No. 93', '081234567982', 'active'),
+('ADM00000094', 'Admin Sembilanpuluhempat', 'admin94@example.com', 'Jl. Admin No. 94', '081234567983', 'active'),
+('ADM00000095', 'Admin Sembilanpuluhlima', 'admin95@example.com', 'Jl. Admin No. 95', '081234567984', 'active'),
+('ADM00000096', 'Admin Sembilanpuluhenam', 'admin96@example.com', 'Jl. Admin No. 96', '081234567985', 'active'),
+('ADM00000097', 'Admin Sembilanpuluhtujuh', 'admin97@example.com', 'Jl. Admin No. 97', '081234567986', 'inactive'),
+('ADM00000098', 'Admin Sembilanpuluhdelapan', 'admin98@example.com', 'Jl. Admin No. 98', '081234567987', 'active'),
+('ADM00000099', 'Admin Sembilanpuluhsembilan', 'admin99@example.com', 'Jl. Admin No. 99', '081234567988', 'active'),
+('ADM00000100', 'Admin Seratus', 'admin100@example.com', 'Jl. Admin No. 100', '081234567989', 'active');
+
+-- DUMMY DATA FOR TABLE: WASTE_TYPE
+INSERT INTO WASTE_TYPE (id, waste_type_name, description, points_per_kg, carbon_savings_per_kg, status) VALUES
+('WST00000001', 'Plastik PET', 'Botol plastik transparan', 150.00, 1.50, 'active'),
+('WST00000002', 'Kertas HVS', 'Kertas bekas kantor', 100.00, 1.20, 'active'),
+('WST00000003', 'Kaca Bening', 'Botol kaca bening', 120.00, 1.00, 'active'),
+('WST00000004', 'Logam Aluminium', 'Kaleng minuman', 200.00, 2.50, 'active'),
+('WST00000005', 'Kardus', 'Kardus bekas kemasan', 80.00, 1.10, 'active'),
+('WST00000006', 'Plastik HDPE', 'Botol plastik susu, jerigen', 130.00, 1.40, 'inactive'),
+('WST00000007', 'Koran Bekas', 'Surat kabar lama', 90.00, 1.15, 'active'),
+('WST00000008', 'Kaca Berwarna', 'Botol kaca berwarna hijau/coklat', 110.00, 0.90, 'active'),
+('WST00000009', 'Logam Besi', 'Potongan besi tua', 180.00, 2.20, 'active'),
+('WST00000010', 'Sampah Organik', 'Sisa makanan, daun', 50.00, 0.50, 'active'),
+('WST00000011', 'Baterai Bekas', 'Baterai AA, AAA, dll', 250.00, 3.00, 'active'),
+('WST00000012', 'Kain Perca', 'Sisa potongan kain', 60.00, 0.70, 'active'),
+('WST00000013', 'Elektronik Kecil', 'Kabel, charger, mouse rusak', 300.00, 3.50, 'active'),
+('WST00000014', 'Majalah', 'Majalah dan tabloid bekas', 95.00, 1.18, 'inactive'),
+('WST00000015', 'Plastik PP', 'Gelas plastik, wadah makanan', 140.00, 1.45, 'active'),
+('WST00000016', 'Logam Tembaga', 'Kabel tembaga', 500.00, 5.00, 'active'),
+('WST00000017', 'Minyak Jelantah', 'Minyak goreng bekas', 70.00, 0.60, 'active'),
+('WST00000018', 'Karet', 'Ban bekas, sol sepatu', 40.00, 0.40, 'active'),
+('WST00000019', 'Styrofoam', 'Gabus kemasan elektronik', 20.00, 0.20, 'inactive'),
+('WST00000020', 'Lampu Bohlam', 'Lampu pijar dan neon', 160.00, 1.80, 'active'),
+('WST00000021', 'CD/DVD Bekas', 'Kepingan CD/DVD rusak', 75.00, 0.85, 'active'),
+('WST00000022', 'Kayu Olahan', 'Potongan kayu, serbuk gergaji', 55.00, 0.65, 'active'),
+('WST00000023', 'Plastik Kresek', 'Kantong plastik belanja', 30.00, 0.30, 'active'),
+('WST00000024', 'Tutup Botol Plastik', 'Tutup botol dari berbagai jenis plastik', 170.00, 1.60, 'active'),
+('WST00000025', 'Buku Tulis Bekas', 'Buku catatan sekolah/kuliah', 105.00, 1.25, 'active'),
+('WST00000026', 'Kaleng Cat', 'Kaleng cat kosong', 100.00, 1.00, 'inactive'),
+('WST00000027', 'Pakaian Bekas', 'Baju, celana tidak layak pakai', 65.00, 0.75, 'active'),
+('WST00000028', 'Popok Bayi', 'Popok sekali pakai', 10.00, 0.10, 'inactive'),
+('WST00000029', 'Sachet Plastik', 'Kemasan sachet kopi, sampo', 25.00, 0.25, 'active'),
+('WST00000030', 'Kabel Listrik', 'Kabel tembaga berisolasi', 220.00, 2.80, 'active'),
+('WST00000031', 'Filter Rokok', 'Puntung rokok', 5.00, 0.05, 'inactive'),
+('WST00000032', 'Cangkang Telur', 'Kulit telur ayam/bebek', 45.00, 0.45, 'active'),
+('WST00000033', 'Peralatan Masak Logam', 'Panci, wajan bekas', 190.00, 2.30, 'active'),
+('WST00000034', 'Botol Infus', 'Botol infus bekas (non-infeksius)', 125.00, 1.35, 'active'),
+('WST00000035', 'Stereofoam Makanan', 'Wadah makanan dari stereofoam', 15.00, 0.15, 'inactive'),
+('WST00000036', 'Kaca Cermin', 'Pecahan cermin', 85.00, 0.80, 'active'),
+('WST00000037', 'Jerami', 'Sisa tanaman padi', 35.00, 0.35, 'active'),
+('WST00000038', 'Karpet Bekas', 'Potongan karpet', 50.00, 0.55, 'active'),
+('WST00000039', 'Kemasan Beling Kosmetik', 'Botol parfum, skincare', 115.00, 0.95, 'active'),
+('WST00000040', 'Kulit Buah', 'Kulit pisang, jeruk, dll', 52.00, 0.52, 'active'),
+('WST00000041', 'Sedotan Plastik', 'Sedotan sekali pakai', 28.00, 0.28, 'active'),
+('WST00000042', 'Daun Kering', 'Guguran daun dari pohon', 33.00, 0.33, 'active'),
+('WST00000043', 'Ember Plastik Pecah', 'Ember dan wadah plastik besar', 135.00, 1.42, 'active'),
+('WST00000044', 'Tinta Printer', 'Cartridge tinta bekas', 90.00, 0.90, 'active'),
+('WST00000045', 'Kertas thermal', 'Kertas struk belanja', 20.00, 0.20, 'inactive'),
+('WST00000046', 'Sepatu Bekas', 'Sepatu tidak layak pakai', 60.00, 0.70, 'active'),
+('WST00000047', 'Ponsel Rusak', 'Telepon genggam tua/rusak', 400.00, 4.50, 'active'),
+('WST00000048', 'Bubble Wrap', 'Plastik gelembung kemasan', 40.00, 0.40, 'active'),
+('WST00000049', 'Kertas Dupleks', 'Kertas karton tebal abu-abu', 78.00, 1.08, 'active'),
+('WST00000050', 'Mainan Plastik Rusak', 'Mainan anak-anak dari plastik', 80.00, 0.80, 'active'),
+('WST00000051', 'Logam Kuningan', 'Pipa atau hiasan kuningan', 450.00, 4.80, 'active'),
+('WST00000052', 'Ampas Kopi/Teh', 'Sisa seduhan kopi atau teh', 48.00, 0.48, 'active'),
+('WST00000053', 'PVC', 'Pipa PVC, kartu plastik', 70.00, 0.75, 'active'),
+('WST00000054', 'Kertas Minyak', 'Kertas pembungkus makanan', 30.00, 0.30, 'inactive'),
+('WST00000055', 'Gabus Pancing', 'Gabus sintetis alat pancing', 22.00, 0.22, 'active'),
+('WST00000056', 'Klip Kertas Logam', 'Penjepit kertas dari logam', 175.00, 2.15, 'active'),
+('WST00000057', 'Busa Spons', 'Spons cuci piring bekas', 18.00, 0.18, 'active'),
+('WST00000058', 'Tas Bekas', 'Tas kulit sintetis atau kain', 58.00, 0.68, 'active'),
+('WST00000059', 'Kalender Bekas', 'Kalender kertas', 92.00, 1.16, 'active'),
+('WST00000060', 'Tali Plastik', 'Tali rafia', 32.00, 0.32, 'active'),
+('WST00000061', 'Sampul Buku Plastik', 'Sampul mika bening', 45.00, 0.45, 'active'),
+('WST00000062', 'Kartu Perdana Bekas', 'Kartu SIM non-aktif', 12.00, 0.12, 'active'),
+('WST00000063', 'Kawat', 'Kawat bendrat, kawat nyamuk', 185.00, 2.25, 'active'),
+('WST00000064', 'Pecahan Keramik', 'Piring, gelas keramik pecah', 38.00, 0.38, 'active'),
+('WST00000065', 'Kemasan Kaca Parfum', 'Botol parfum kaca', 122.00, 1.02, 'active'),
+('WST00000066', 'Kertas Foto', 'Kertas cetak foto', 42.00, 0.42, 'inactive'),
+('WST00000067', 'Tisu Bekas', 'Tisu kotor', 8.00, 0.08, 'inactive'),
+('WST00000068', 'Galon Sekali Pakai', 'Galon air minum sekali pakai', 155.00, 1.55, 'active'),
+('WST00000069', 'Mika Plastik', 'Kemasan kue dari mika', 55.00, 0.55, 'active'),
+('WST00000070', 'Ranting Pohon', 'Potongan ranting dan dahan kecil', 36.00, 0.36, 'active'),
+('WST00000071', 'Toples Plastik', 'Toples kue kering', 138.00, 1.44, 'active'),
+('WST00000072', 'Kertas NCR', 'Kertas nota karbon', 40.00, 0.40, 'inactive'),
+('WST00000073', 'Mousepad Bekas', 'Alas mouse dari karet/kain', 25.00, 0.25, 'active'),
+('WST00000074', 'Isi Staples', 'Sisa isi staples', 165.00, 2.10, 'active'),
+('WST00000075', 'Rel Gorden Aluminium', 'Batang gorden dari aluminium', 205.00, 2.55, 'active'),
+('WST00000076', 'Sikat Gigi Bekas', 'Sikat gigi plastik', 19.00, 0.19, 'active'),
+('WST00000077', 'Kaset Pita', 'Kaset audio/video lama', 68.00, 0.78, 'active'),
+('WST00000078', 'Kertas Amplop', 'Amplop surat bekas', 88.00, 1.14, 'active'),
+('WST00000079', 'Tutup Galon', 'Tutup galon air minum', 34.00, 0.34, 'active'),
+('WST00000080', 'Gunting Bekas', 'Gunting besi/plastik', 170.00, 2.15, 'active'),
+('WST00000081', 'Remote TV Rusak', 'Remote kontrol elektronik', 280.00, 3.20, 'active'),
+('WST00000082', 'Jepitan Jemuran Plastik', 'Jepitan baju rusak', 43.00, 0.43, 'active'),
+('WST00000083', 'Casing HP Plastik', 'Pelindung HP dari plastik', 53.00, 0.53, 'active'),
+('WST00000084', 'Gelas Kaca Pecah', 'Pecahan gelas minum', 118.00, 0.98, 'active'),
+('WST00000085', 'Potongan Seng', 'Sisa seng bangunan', 177.00, 2.17, 'active'),
+('WST00000086', 'Bungkus Permen Plastik', 'Kemasan permen kecil', 24.00, 0.24, 'active'),
+('WST00000087', 'Headphone Rusak', 'Headphone/earphone tidak berfungsi', 290.00, 3.40, 'active'),
+('WST00000088', 'Gabus Buah', 'Jaring pembungkus buah', 21.00, 0.21, 'active'),
+('WST00000089', 'Hanggar Baju Plastik', 'Gantungan baju plastik patah', 66.00, 0.66, 'active'),
+('WST00000090', 'Filter Air', 'Filter air minum bekas', 77.00, 0.87, 'active'),
+('WST00000091', 'Papan Sirkuit (PCB)', 'Papan sirkuit elektronik tanpa komponen', 320.00, 3.80, 'active'),
+('WST00000092', 'Benang Wol Sisa', 'Sisa benang rajut', 41.00, 0.41, 'active'),
+('WST00000093', 'Kertas Bungkus Nasi', 'Kertas nasi coklat', 29.00, 0.29, 'inactive'),
+('WST00000094', 'Tali Sepatu Bekas', 'Tali sepatu dari kain/sintetis', 14.00, 0.14, 'active'),
+('WST00000095', 'Asbes', 'Potongan atap asbes (perlu penanganan khusus)', 10.00, 0.10, 'inactive'),
+('WST00000096', 'Korek Api Gas Kosong', 'Korek api plastik', 16.00, 0.16, 'active'),
+('WST00000097', 'Bohlam LED', 'Lampu LED mati', 260.00, 2.90, 'active'),
+('WST00000098', 'Kemasan Obat (Blister)', 'Kemasan obat dari plastik/aluminium foil', 46.00, 0.46, 'active'),
+('WST00000099', 'Paku Bekas', 'Paku besi bengkok', 182.00, 2.22, 'active'),
+('WST00000100', 'Tetra Pak', 'Kemasan karton susu/jus', 70.00, 0.80, 'active');
+
+-- DUMMY DATA FOR TABLE: REWARD_ITEM
+INSERT INTO REWARD_ITEM (id, name, description, points_required, stock, status) VALUES
+('RWD00000001', 'Voucher Pulsa 10k', 'Voucher pulsa 10.000 untuk semua operator', 1000, 50, 'available'),
+('RWD00000002', 'Tumbler ITS', 'Botol minum eksklusif ITS', 5000, 20, 'available'),
+('RWD00000003', 'Totebag Kanvas', 'Tas jinjing ramah lingkungan', 3000, 100, 'available'),
+('RWD00000004', 'Gantungan Kunci ITS', 'Gantungan kunci logo ITS', 1500, 200, 'available'),
+('RWD00000005', 'Voucher Makan Kantin', 'Voucher makan senilai 15.000 di kantin pusat', 1500, 75, 'unavailable'),
+('RWD00000006', 'Kaos ITS Recycles', 'Kaos official kampanye daur ulang', 7500, 30, 'available'),
+('RWD00000007', 'Buku Catatan Daur Ulang', 'Buku catatan dari kertas daur ulang', 2000, 150, 'available'),
+('RWD00000008', 'Voucher OVO 25k', 'Saldo OVO senilai 25.000', 2500, 40, 'available'),
+('RWD00000009', 'Paket Alat Tulis', 'Berisi pulpen, pensil, penghapus', 2200, 60, 'available'),
+('RWD00000010', 'Diskon UKT 1%', 'Potongan Uang Kuliah Tunggal sebesar 1%', 10000, 10, 'available'),
+('RWD00000011', 'Voucher GoPay 10k', 'Saldo GoPay senilai 10.000', 1000, 50, 'available'),
+('RWD00000012', 'Sedotan Stainless', 'Set sedotan stainless steel dengan sikat', 1800, 80, 'available'),
+('RWD00000013', 'Bibit Tanaman', 'Bibit cabai atau tomat', 800, 250, 'available'),
+('RWD00000014', 'Voucher Belanja Koperasi', 'Voucher belanja 20.000 di Kopma ITS', 2000, 60, 'unavailable'),
+('RWD00000015', 'Mug Keramik ITS', 'Cangkir keramik dengan logo ITS', 4500, 25, 'available'),
+('RWD00000016', 'Stiker Pack ITS', 'Satu set stiker tema ITS dan lingkungan', 500, 500, 'available'),
+('RWD00000017', 'Voucher Pulsa 5k', 'Voucher pulsa 5.000 untuk semua operator', 500, 100, 'available'),
+('RWD00000018', 'Masker Kain 3 Lapis', 'Masker kain non-medis', 1200, 120, 'available'),
+('RWD00000019', 'Topi ITS', 'Topi baseball dengan logo ITS', 4800, 22, 'available'),
+('RWD00000020', 'Donasi Lingkungan', 'Donasi atas namamu ke yayasan lingkungan', 1000, 999, 'available'),
+('RWD00000021', 'E-book Premium', 'Akses download satu e-book premium', 3500, 999, 'available'),
+('RWD00000022', 'Paket Kopi Lokal', 'Kopi bubuk 100gr dari petani lokal', 2800, 45, 'available'),
+('RWD00000023', 'Voucher Parkir Bulanan', 'Gratis parkir motor 1 bulan di kampus', 8000, 15, 'unavailable'),
+('RWD00000024', 'Pulpen Tanam', 'Pulpen dengan bibit tanaman di ujungnya', 1600, 90, 'available'),
+('RWD00000025', 'Goodie Bag Daur Ulang', 'Tas serut dari bahan daur ulang', 2500, 55, 'available'),
+('RWD00000026', 'Voucher Listrik 20k', 'Token listrik prabayar senilai 20.000', 2100, 35, 'available'),
+('RWD00000027', 'Payung Lipat', 'Payung lipat kecil logo ITS', 6000, 18, 'available'),
+('RWD00000028', 'Hand Sanitizer', 'Hand sanitizer 50ml', 900, 180, 'available'),
+('RWD00000029', 'Lanyard ITS', 'Tali ID card eksklusif ITS', 3200, 40, 'available'),
+('RWD00000030', 'Tas Bekal', 'Tas bekal makan tahan panas', 4000, 33, 'available'),
+('RWD00000031', 'Voucher Dana 15k', 'Saldo DANA senilai 15.000', 1500, 65, 'available'),
+('RWD00000032', 'Pupuk Kompos', 'Pupuk kompos 1kg hasil olahan sampah organik', 700, 300, 'available'),
+('RWD00000033', 'Pouch Serbaguna', 'Dompet kain kecil serbaguna', 1300, 110, 'available'),
+('RWD00000034', 'Voucher Internet 1GB', 'Paket data 1GB untuk 7 hari', 1400, 70, 'unavailable'),
+('RWD00000035', 'Sendok Garpu Kayu', 'Set alat makan dari kayu', 2600, 58, 'available'),
+('RWD00000036', 'Pin Enamel', 'Pin enamel karakter robot ITS', 2300, 88, 'available'),
+('RWD00000037', 'Voucher Streaming 1 Bulan', 'Langganan platform streaming musik/film', 9000, 12, 'available'),
+('RWD00000038', 'Bantal Leher', 'Bantal leher untuk perjalanan', 5500, 24, 'available'),
+('RWD00000039', 'Flashdisk 16GB', 'USB Flash Drive 16GB', 7000, 16, 'available'),
+('RWD00000040', 'Sandal Jepit Kustom', 'Sandal jepit dengan desain ITS', 3300, 38, 'available'),
+('RWD00000041', 'Kaos Kaki ITS', 'Kaos kaki motif logo ITS', 2400, 62, 'available'),
+('RWD00000042', 'Voucher Game 10k', 'Voucher untuk top-up game online', 1100, 95, 'available'),
+('RWD00000043', 'Casing HP Biorusak', 'Casing HP dari bahan ramah lingkungan', 6500, 17, 'available'),
+('RWD00000044', 'Jas Hujan Ponco', 'Jas hujan sekali pakai (biodegradable)', 800, 220, 'available'),
+('RWD00000045', 'Kipas Angin USB', 'Kipas angin mini portable', 4200, 28, 'available'),
+('RWD00000046', 'Lunch Box Set', 'Set kotak makan dengan sendok garpu', 5800, 21, 'available'),
+('RWD00000047', 'Voucher Potong Rambut', 'Voucher potong rambut di barbershop rekanan', 3800, 31, 'unavailable'),
+('RWD00000048', 'Sabun Organik Batang', 'Sabun mandi dari bahan alami', 1700, 77, 'available'),
+('RWD00000049', 'Subscription Berita Online', 'Langganan 1 bulan portal berita premium', 4400, 26, 'available'),
+('RWD00000050', 'Power Bank 10000mAh', 'Pengisi daya portabel', 12000, 8, 'available'),
+('RWD00000051', 'Tiket Nonton Bioskop', 'Satu tiket nonton film di bioskop XXI', 8500, 14, 'available'),
+('RWD00000052', 'Celemek Masak', 'Celemek dengan tulisan "ITS Eco Chef"', 3100, 42, 'available'),
+('RWD00000053', 'Jam Dinding Daur Ulang', 'Jam dinding dari bahan daur ulang', 7800, 11, 'available'),
+('RWD00000054', 'Dompet Kartu', 'Dompet khusus untuk kartu', 2900, 48, 'available'),
+('RWD00000055', 'Voucher Minuman Boba', 'Voucher satu gelas minuman boba', 2700, 53, 'available'),
+('RWD00000056', 'Speaker Bluetooth Mini', 'Speaker portable kecil', 9500, 9, 'available'),
+('RWD00000057', 'Keranjang Belanja Lipat', 'Tas belanja lipat pengganti kresek', 1900, 82, 'available'),
+('RWD00000058', 'Lilin Aroma Terapi', 'Lilin wangi untuk relaksasi', 3600, 36, 'available'),
+('RWD00000059', 'Selimut Travel', 'Selimut tipis untuk perjalanan', 6800, 19, 'available'),
+('RWD00000060', 'Mousepad ITS', 'Mousepad dengan desain gedung rektorat', 3400, 39, 'available'),
+('RWD00000061', 'Voucher Fotokopi 100 Lembar', 'Voucher untuk fotokopi di koperasi', 1300, 99, 'available'),
+('RWD00000062', 'Tas Sepatu', 'Tas khusus untuk membawa sepatu', 2100, 66, 'available'),
+('RWD00000063', 'Botol Spray', 'Botol semprot serbaguna 100ml', 600, 400, 'available'),
+('RWD00000064', 'Paket Sembako Mini', 'Berisi beras 1kg dan minyak 500ml', 4600, 23, 'available'),
+('RWD00000065', 'Kacamata Anti Radiasi', 'Kacamata untuk penggunaan komputer', 8800, 13, 'available'),
+('RWD00000066', 'Biji Kopi Robusta 250gr', 'Biji kopi mentah untuk disangrai', 3900, 29, 'available'),
+('RWD00000067', 'Notebook Hard Cover', 'Buku catatan dengan sampul tebal', 4100, 27, 'available'),
+('RWD00000068', 'Sarung Tangan Motor', 'Sarung tangan untuk berkendara', 3700, 34, 'available'),
+('RWD00000069', 'Poster Inspiratif', 'Poster ukuran A3 dengan kutipan motivasi', 900, 150, 'available'),
+('RWD00000070', 'Lampu Belajar LED', 'Lampu meja portable', 7200, 15, 'available'),
+('RWD00000071', 'Puzzle Kayu 3D', 'Mainan puzzle 3D bentuk hewan', 5300, 25, 'available'),
+('RWD00000072', 'Voucher Servis Laptop', 'Diskon 20% untuk servis di rekanan', 5000, 20, 'unavailable'),
+('RWD00000073', 'Holder HP Motor', 'Tempat HP untuk di stang motor', 4900, 22, 'available'),
+('RWD00000074', 'Jaket Parasut', 'Jaket tipis anti angin', 11000, 7, 'available'),
+('RWD00000075', 'Tikar Piknik', 'Tikar lipat untuk piknik', 6200, 18, 'available'),
+('RWD00000076', 'Blender Portable', 'Blender jus mini dengan USB', 10500, 6, 'available'),
+('RWD00000077', 'Termos Air Panas 500ml', 'Termos kecil untuk air panas', 8200, 10, 'available'),
+('RWD00000078', 'Timbangan Dapur Digital', 'Timbangan untuk memasak', 9800, 5, 'available'),
+('RWD00000079', 'Headset Bluetooth', 'Headset tanpa kabel', 13000, 4, 'available'),
+('RWD00000080', 'Action Figure Robot ITS', 'Figur mini maskot ITS', 15000, 3, 'unavailable'),
+('RWD00000081', 'Voucher Toko Buku 50k', 'Voucher belanja di Gramedia', 5200, 25, 'available'),
+('RWD00000082', 'Payung Golf ITS', 'Payung besar dengan logo ITS', 9200, 12, 'available'),
+('RWD00000083', 'Jam Tangan Digital', 'Jam tangan digital sporty', 8600, 11, 'available'),
+('RWD00000084', 'Rantang Susun', 'Rantang makanan 2 susun', 6600, 16, 'available'),
+('RWD00000085', 'Helm SNI', 'Helm motor standar SNI', 14000, 5, 'available'),
+('RWD00000086', 'Voucher Steam 20k', 'Saldo Steam Wallet', 2400, 50, 'available'),
+('RWD00000087', 'Set Obeng Mini', 'Satu set obeng kecil serbaguna', 4300, 30, 'available'),
+('RWD00000088', 'Gembok dan Kunci', 'Gembok kecil untuk loker/tas', 1800, 70, 'available'),
+('RWD00000089', 'Rak Buku Dinding', 'Rak buku kayu kecil', 7700, 14, 'available'),
+('RWD00000090', 'Papan Catur Kayu', 'Set papan catur lipat', 8900, 9, 'available'),
+('RWD00000091', 'Voucher Cuci Motor', 'Voucher untuk cuci motor', 1700, 60, 'available'),
+('RWD00000092', 'Senter LED', 'Senter kecil', 3000, 45, 'available'),
+('RWD00000093', 'Kabel Data 3-in-1', 'Kabel charger microUSB, C, lightning', 5100, 28, 'available'),
+('RWD00000094', 'Batu Baterai Isi Ulang', 'Sepasang baterai AA rechargeable', 6400, 17, 'available'),
+('RWD00000095', 'Botol Minum Infuser', 'Botol dengan saringan buah', 5600, 21, 'available'),
+('RWD00000096', 'Tripod Mini HP', 'Tripod fleksibel untuk HP', 4700, 26, 'available'),
+('RWD00000097', 'Pengharum Ruangan Otomatis', 'Alat semprot pengharum ruangan', 9900, 8, 'available'),
+('RWD00000098', 'Dispenser Sabun Cair', 'Dispenser sabun untuk wastafel', 3500, 35, 'available'),
+('RWD00000099', 'Keyboard Wireless', 'Keyboard bluetooth portable', 12500, 4, 'available'),
+('RWD00000100', 'Hoodie ITS', 'Jaket hoodie dengan logo ITS', 16000, 2, 'unavailable');
+
+-- DUMMY DATA FOR TABLE: RECYCLING_ACTIVITY
+-- Note: Foreign keys (admin_id, user_id, waste_type_id, recycling_bin_id) are chosen randomly from existing/created data.
+INSERT INTO RECYCLING_ACTIVITY (id, weight_kg, points_earned, timestamp, verification_staff, admin_id, user_id, waste_type_id, recycling_bin_id) VALUES
+('RAC00000001', 2.50, 375, '2024-10-01 10:00:00', 'verified', 'ADM00000001', 'USR0001', 'WST00000001', 'RCB00000014'),
+('RAC00000002', 1.20, 120, '2024-10-01 11:30:00', 'verified', 'ADM00000002', 'USR0002', 'WST00000002', 'RCB00000022'),
+('RAC00000003', 3.00, 360, '2024-10-02 09:15:00', 'pending', 'ADM00000003', 'USR0003', 'WST00000003', 'RCB00000051'),
+('RAC00000004', 0.80, 160, '2024-10-02 14:05:00', 'verified', 'ADM00000004', 'USR0004', 'WST00000004', 'RCB00000064'),
+('RAC00000005', 5.50, 440, '2024-10-03 16:20:00', 'verified', 'ADM00000005', 'USR0005', 'WST00000005', 'RCB00000087'),
+('RAC00000006', 2.10, 273, '2024-10-03 17:00:00', 'verified', 'ADM00000006', 'USR0006', 'WST00000006', 'RCB00000098'),
+('RAC00000007', 4.00, 360, '2024-10-04 08:45:00', 'pending', 'ADM00000007', 'USR0007', 'WST00000007', 'RCB00000001'),
+('RAC00000008', 1.50, 165, '2024-10-04 10:10:00', 'verified', 'ADM00000008', 'USR0008', 'WST00000008', 'RCB00000006'),
+('RAC00000009', 0.70, 126, '2024-10-05 11:00:00', 'verified', 'ADM00000009', 'USR0009', 'WST00000009', 'RCB00000023'),
+('RAC00000010', 10.20, 510, '2024-10-05 13:50:00', 'verified', 'ADM00000010', 'USR0010', 'WST00000010', 'RCB00000038'),
+('RAC00000011', 0.50, 125, '2024-10-06 09:00:00', 'verified', 'ADM00000011', 'USR0011', 'WST00000011', 'RCB00000041'),
+('RAC00000012', 3.20, 192, '2024-10-06 10:20:00', 'pending', 'ADM00000012', 'USR0012', 'WST00000012', 'RCB00000053'),
+('RAC00000013', 0.30, 90, '2024-10-07 11:40:00', 'verified', 'ADM00000013', 'USR0013', 'WST00000013', 'RCB00000061'),
+('RAC00000014', 2.80, 266, '2024-10-07 14:00:00', 'verified', 'ADM00000014', 'USR0014', 'WST00000014', 'RCB00000072'),
+('RAC00000015', 1.90, 266, '2024-10-08 15:15:00', 'verified', 'ADM00000015', 'USR0015', 'WST00000015', 'RCB00000083'),
+('RAC00000016', 0.10, 50, '2024-10-08 16:30:00', 'pending', 'ADM00000016', 'USR0016', 'WST00000016', 'RCB00000091'),
+('RAC00000017', 5.00, 350, '2024-10-09 09:45:00', 'verified', 'ADM00000017', 'USR0017', 'WST00000017', 'RCB00000099'),
+('RAC00000018', 4.50, 180, '2024-10-09 11:00:00', 'verified', 'ADM00000018', 'USR0018', 'WST00000018', 'RCB00000002'),
+('RAC00000019', 1.00, 20, '2024-10-10 12:10:00', 'verified', 'ADM00000019', 'USR0019', 'WST00000019', 'RCB00000011'),
+('RAC00000020', 0.20, 32, '2024-10-10 13:25:00', 'pending', 'ADM00000020', 'USR0020', 'WST00000020', 'RCB00000020'),
+('RAC00000021', 1.50, 112, '2024-11-01 09:30:00', 'verified', 'ADM00000021', 'USR0021', 'WST00000021', 'RCB00000030'),
+('RAC00000022', 2.20, 121, '2024-11-01 10:45:00', 'verified', 'ADM00000022', 'USR0022', 'WST00000022', 'RCB00000040'),
+('RAC00000023', 6.10, 183, '2024-11-02 11:50:00', 'verified', 'ADM00000023', 'USR0023', 'WST00000023', 'RCB00000050'),
+('RAC00000024', 0.40, 68, '2024-11-02 14:00:00', 'pending', 'ADM00000024', 'USR0024', 'WST00000024', 'RCB00000060'),
+('RAC00000025', 3.30, 346, '2024-11-03 15:05:00', 'verified', 'ADM00000025', 'USR0025', 'WST00000025', 'RCB00000070'),
+('RAC00000026', 1.10, 110, '2024-11-03 16:10:00', 'verified', 'ADM00000026', 'USR0026', 'WST00000026', 'RCB00000080'),
+('RAC00000027', 4.20, 273, '2024-11-04 09:25:00', 'verified', 'ADM00000027', 'USR0027', 'WST00000027', 'RCB00000090'),
+('RAC00000028', 0.10, 1, '2024-11-04 10:30:00', 'verified', 'ADM00000028', 'USR0028', 'WST00000028', 'RCB00000100'),
+('RAC00000029', 2.00, 50, '2024-11-05 11:35:00', 'pending', 'ADM00000029', 'USR0029', 'WST00000029', 'RCB00000003'),
+('RAC00000030', 0.60, 132, '2024-11-05 12:40:00', 'verified', 'ADM00000030', 'USR0030', 'WST00000030', 'RCB00000013'),
+('RAC00000031', 0.05, 0, '2024-12-01 09:00:00', 'verified', 'ADM00000031', 'USR0031', 'WST00000031', 'RCB00000023'),
+('RAC00000032', 7.00, 315, '2024-12-01 10:15:00', 'verified', 'ADM00000032', 'USR0032', 'WST00000032', 'RCB00000033'),
+('RAC00000033', 1.30, 247, '2024-12-02 11:20:00', 'verified', 'ADM00000033', 'USR0033', 'WST00000033', 'RCB00000043'),
+('RAC00000034', 2.40, 300, '2024-12-02 13:30:00', 'pending', 'ADM00000034', 'USR0034', 'WST00000034', 'RCB00000054'),
+('RAC00000035', 0.80, 12, '2024-12-03 14:35:00', 'verified', 'ADM00000035', 'USR0035', 'WST00000035', 'RCB00000064'),
+('RAC00000036', 1.60, 136, '2024-12-03 15:40:00', 'verified', 'ADM00000036', 'USR0036', 'WST00000036', 'RCB00000074'),
+('RAC00000037', 3.50, 122, '2024-12-04 09:55:00', 'verified', 'ADM00000037', 'USR0037', 'WST00000037', 'RCB00000084'),
+('RAC00000038', 2.70, 135, '2024-12-04 11:00:00', 'pending', 'ADM00000038', 'USR0038', 'WST00000038', 'RCB00000094'),
+('RAC00000039', 0.90, 103, '2024-12-05 12:05:00', 'verified', 'ADM00000039', 'USR0039', 'WST00000039', 'RCB00000004'),
+('RAC00000040', 8.00, 416, '2024-12-05 13:10:00', 'verified', 'ADM00000040', 'USR0040', 'WST00000040', 'RCB00000014'),
+('RAC00000041', 1.00, 28, '2025-01-10 09:00:00', 'verified', 'ADM00000041', 'USR0041', 'WST00000041', 'RCB00000024'),
+('RAC00000042', 4.80, 158, '2025-01-10 10:00:00', 'verified', 'ADM00000042', 'USR0042', 'WST00000042', 'RCB00000034'),
+('RAC00000043', 1.40, 189, '2025-01-11 11:00:00', 'pending', 'ADM00000043', 'USR0043', 'WST00000043', 'RCB00000044'),
+('RAC00000044', 0.30, 27, '2025-01-11 12:00:00', 'verified', 'ADM00000044', 'USR0044', 'WST00000044', 'RCB00000055'),
+('RAC00000045', 2.60, 52, '2025-01-12 13:00:00', 'verified', 'ADM00000045', 'USR0045', 'WST00000045', 'RCB00000065'),
+('RAC00000046', 3.10, 186, '2025-01-12 14:00:00', 'verified', 'ADM00000046', 'USR0046', 'WST00000046', 'RCB00000075'),
+('RAC00000047', 0.25, 100, '2025-01-13 15:00:00', 'verified', 'ADM00000047', 'USR0047', 'WST00000047', 'RCB00000085'),
+('RAC00000048', 1.70, 68, '2025-01-13 16:00:00', 'pending', 'ADM00000048', 'USR0048', 'WST00000048', 'RCB00000095'),
+('RAC00000049', 2.90, 226, '2025-01-14 09:00:00', 'verified', 'ADM00000049', 'USR0049', 'WST00000049', 'RCB00000005'),
+('RAC00000050', 1.30, 104, '2025-01-14 10:00:00', 'verified', 'ADM00000050', 'USR0050', 'WST00000050', 'RCB00000015'),
+('RAC00000051', 0.15, 67, '2025-02-01 11:00:00', 'verified', 'ADM00000051', 'USR0051', 'WST00000051', 'RCB00000025'),
+('RAC00000052', 4.40, 211, '2025-02-01 12:00:00', 'verified', 'ADM00000052', 'USR0052', 'WST00000052', 'RCB00000035'),
+('RAC00000053', 3.60, 252, '2025-02-02 13:00:00', 'pending', 'ADM00000053', 'USR0053', 'WST00000053', 'RCB00000045'),
+('RAC00000054', 0.70, 21, '2025-02-02 14:00:00', 'verified', 'ADM00000054', 'USR0054', 'WST00000054', 'RCB00000056'),
+('RAC00000055', 1.20, 26, '2025-02-03 15:00:00', 'verified', 'ADM00000055', 'USR0055', 'WST00000055', 'RCB00000066'),
+('RAC00000056', 2.00, 350, '2025-02-03 16:00:00', 'verified', 'ADM00000056', 'USR0056', 'WST00000056', 'RCB00000076'),
+('RAC00000057', 0.90, 16, '2025-02-04 09:00:00', 'verified', 'ADM00000057', 'USR0057', 'WST00000057', 'RCB00000086'),
+('RAC00000058', 3.80, 220, '2025-02-04 10:00:00', 'pending', 'ADM00000058', 'USR0058', 'WST00000058', 'RCB00000096'),
+('RAC00000059', 1.10, 101, '2025-02-05 11:00:00', 'verified', 'ADM00000059', 'USR0059', 'WST00000059', 'RCB00000007'),
+('RAC00000060', 0.40, 12, '2025-02-05 12:00:00', 'verified', 'ADM00000060', 'USR0060', 'WST00000060', 'RCB00000017'),
+('RAC00000061', 2.30, 103, '2025-03-10 09:00:00', 'verified', 'ADM00000061', 'USR0061', 'WST00000061', 'RCB00000027'),
+('RAC00000062', 0.02, 0, '2025-03-10 10:00:00', 'verified', 'ADM00000062', 'USR0062', 'WST00000062', 'RCB00000037'),
+('RAC00000063', 0.55, 101, '2025-03-11 11:00:00', 'pending', 'ADM00000063', 'USR0063', 'WST00000063', 'RCB00000047'),
+('RAC00000064', 3.00, 114, '2025-03-11 12:00:00', 'verified', 'ADM00000064', 'USR0064', 'WST00000064', 'RCB00000057'),
+('RAC00000065', 1.80, 219, '2025-03-12 13:00:00', 'verified', 'ADM00000065', 'USR0065', 'WST00000065', 'RCB00000067'),
+('RAC00000066', 2.10, 88, '2025-03-12 14:00:00', 'verified', 'ADM00000066', 'USR0066', 'WST00000066', 'RCB00000077'),
+('RAC00000067', 0.75, 6, '2025-03-13 15:00:00', 'pending', 'ADM00000067', 'USR0067', 'WST00000067', 'RCB00000087'),
+('RAC00000068', 1.25, 193, '2025-03-13 16:00:00', 'verified', 'ADM00000068', 'USR0068', 'WST00000068', 'RCB00000097'),
+('RAC00000069', 3.40, 187, '2025-03-14 09:00:00', 'verified', 'ADM00000069', 'USR0069', 'WST00000069', 'RCB00000008'),
+('RAC00000070', 4.00, 144, '2025-03-14 10:00:00', 'verified', 'ADM00000070', 'USR0070', 'WST00000070', 'RCB00000018'),
+('RAC00000071', 1.60, 220, '2025-04-20 11:00:00', 'verified', 'ADM00000071', 'USR0071', 'WST00000071', 'RCB00000028'),
+('RAC00000072', 2.50, 100, '2025-04-20 12:00:00', 'verified', 'ADM00000072', 'USR0072', 'WST00000072', 'RCB00000038'),
+('RAC00000073', 0.80, 20, '2025-04-21 13:00:00', 'pending', 'ADM00000073', 'USR0073', 'WST00000073', 'RCB00000048'),
+('RAC00000074', 0.20, 33, '2025-04-21 14:00:00', 'verified', 'ADM00000074', 'USR0074', 'WST00000074', 'RCB00000058'),
+('RAC00000075', 0.60, 123, '2025-04-22 15:00:00', 'verified', 'ADM00000075', 'USR0075', 'WST00000075', 'RCB00000068'),
+('RAC00000076', 1.00, 19, '2025-04-22 16:00:00', 'verified', 'ADM00000076', 'USR0076', 'WST00000076', 'RCB00000078'),
+('RAC00000077', 0.45, 30, '2025-04-23 09:00:00', 'verified', 'ADM00000077', 'USR0077', 'WST00000077', 'RCB00000088'),
+('RAC00000078', 3.70, 325, '2025-04-23 10:00:00', 'pending', 'ADM00000078', 'USR0078', 'WST00000078', 'RCB00000098'),
+('RAC00000079', 1.90, 64, '2025-04-24 11:00:00', 'verified', 'ADM00000079', 'USR0079', 'WST00000079', 'RCB00000009'),
+('RAC00000080', 0.70, 119, '2025-04-24 12:00:00', 'verified', 'ADM00000080', 'USR0080', 'WST00000080', 'RCB00000019'),
+('RAC00000081', 0.22, 61, '2025-05-15 13:00:00', 'verified', 'ADM00000081', 'USR0081', 'WST00000081', 'RCB00000029'),
+('RAC00000082', 1.40, 59, '2025-05-15 14:00:00', 'verified', 'ADM00000082', 'USR0082', 'WST00000082', 'RCB00000039'),
+('RAC00000083', 2.80, 148, '2025-05-16 15:00:00', 'pending', 'ADM00000083', 'USR0083', 'WST00000083', 'RCB00000049'),
+('RAC00000084', 3.00, 354, '2025-05-16 16:00:00', 'verified', 'ADM00000084', 'USR0084', 'WST00000084', 'RCB00000059'),
+('RAC00000085', 1.10, 194, '2025-05-17 09:00:00', 'verified', 'ADM00000085', 'USR0085', 'WST00000085', 'RCB00000069'),
+('RAC00000086', 0.65, 15, '2025-05-17 10:00:00', 'verified', 'ADM00000086', 'USR0086', 'WST00000086', 'RCB00000079'),
+('RAC00000087', 0.12, 34, '2025-05-18 11:00:00', 'verified', 'ADM00000087', 'USR0087', 'WST00000087', 'RCB00000089'),
+('RAC00000088', 2.20, 46, '2025-05-18 12:00:00', 'pending', 'ADM00000088', 'USR0088', 'WST00000088', 'RCB00000099'),
+('RAC00000089', 1.70, 112, '2025-05-19 13:00:00', 'verified', 'ADM00000089', 'USR0089', 'WST00000089', 'RCB00000010'),
+('RAC00000090', 0.80, 56, '2025-05-19 14:00:00', 'verified', 'ADM00000090', 'USR0090', 'WST00000090', 'RCB00000020'),
+('RAC00000091', 0.40, 128, '2025-06-01 09:00:00', 'verified', 'ADM00000091', 'USR0091', 'WST00000091', 'RCB00000031'),
+('RAC00000092', 1.90, 77, '2025-06-01 10:00:00', 'verified', 'ADM00000092', 'USR0092', 'WST00000092', 'RCB00000041'),
+('RAC00000093', 3.30, 95, '2025-06-02 11:00:00', 'verified', 'ADM00000093', 'USR0093', 'WST00000093', 'RCB00000051'),
+('RAC00000094', 0.50, 7, '2025-06-02 12:00:00', 'pending', 'ADM00000094', 'USR0094', 'WST00000094', 'RCB00000061'),
+('RAC00000095', 1.20, 12, '2025-06-03 13:00:00', 'verified', 'ADM00000095', 'USR0095', 'WST00000095', 'RCB00000071'),
+('RAC00000096', 0.10, 1, '2025-06-03 14:00:00', 'verified', 'ADM00000096', 'USR0096', 'WST00000096', 'RCB00000081'),
+('RAC00000097', 2.00, 520, '2025-06-04 15:00:00', 'verified', 'ADM00000097', 'USR0097', 'WST00000097', 'RCB00000091'),
+('RAC00000098', 0.85, 39, '2025-06-04 16:00:00', 'verified', 'ADM00000098', 'USR0098', 'WST00000098', 'RCB00000001'),
+('RAC00000099', 4.10, 746, '2025-06-05 09:00:00', 'pending', 'ADM00000099', 'USR0099', 'WST00000099', 'RCB00000012'),
+('RAC00000100', 1.80, 126, '2025-06-15 12:00:00', 'verified', 'ADM00000100', 'USR0100', 'WST00000100', 'RCB00000100');
+
+-- DUMMY DATA FOR TABLE: POINTS
+-- Note: Each point record is linked to a corresponding recycling activity.
+INSERT INTO POINTS (id, description, point, when_earn, status, user_id, recycling_activity_id) VALUES
+(1, 'Poin dari daur ulang Plastik PET', 375, '2024-10-01 10:00:00', 'earned', 'USR0001', 'RAC00000001'),
+(2, 'Poin dari daur ulang Kertas HVS', 120, '2024-10-01 11:30:00', 'earned', 'USR0002', 'RAC00000002'),
+(3, 'Poin dari daur ulang Kaca Bening', 360, '2024-10-02 09:15:00', 'pending', 'USR0003', 'RAC00000003'),
+(4, 'Poin dari daur ulang Logam Aluminium', 160, '2024-10-02 14:05:00', 'spent', 'USR0004', 'RAC00000004'),
+(5, 'Poin dari daur ulang Kardus', 440, '2024-10-03 16:20:00', 'earned', 'USR0005', 'RAC00000005'),
+(6, 'Poin dari daur ulang Plastik HDPE', 273, '2024-10-03 17:00:00', 'earned', 'USR0006', 'RAC00000006'),
+(7, 'Poin dari daur ulang Koran Bekas', 360, '2024-10-04 08:45:00', 'pending', 'USR0007', 'RAC00000007'),
+(8, 'Poin dari daur ulang Kaca Berwarna', 165, '2024-10-04 10:10:00', 'earned', 'USR0008', 'RAC00000008'),
+(9, 'Poin dari daur ulang Logam Besi', 126, '2024-10-05 11:00:00', 'spent', 'USR0009', 'RAC00000009'),
+(10, 'Poin dari daur ulang Sampah Organik', 510, '2024-10-05 13:50:00', 'earned', 'USR0010', 'RAC00000010'),
+(11, 'Poin dari daur ulang Baterai Bekas', 125, '2024-10-06 09:00:00', 'spent', 'USR0011', 'RAC00000011'),
+(12, 'Poin dari daur ulang Kain Perca', 192, '2024-10-06 10:20:00', 'pending', 'USR0012', 'RAC00000012'),
+(13, 'Poin dari daur ulang Elektronik Kecil', 90, '2024-10-07 11:40:00', 'earned', 'USR0013', 'RAC00000013'),
+(14, 'Poin dari daur ulang Majalah', 266, '2024-10-07 14:00:00', 'earned', 'USR0014', 'RAC00000014'),
+(15, 'Poin dari daur ulang Plastik PP', 266, '2024-10-08 15:15:00', 'earned', 'USR0015', 'RAC00000015'),
+(16, 'Poin dari daur ulang Logam Tembaga', 50, '2024-10-08 16:30:00', 'pending', 'USR0016', 'RAC00000016'),
+(17, 'Poin dari daur ulang Minyak Jelantah', 350, '2024-10-09 09:45:00', 'spent', 'USR0017', 'RAC00000017'),
+(18, 'Poin dari daur ulang Karet', 180, '2024-10-09 11:00:00', 'earned', 'USR0018', 'RAC00000018'),
+(19, 'Poin dari daur ulang Styrofoam', 20, '2024-10-10 12:10:00', 'earned', 'USR0019', 'RAC00000019'),
+(20, 'Poin dari daur ulang Lampu Bohlam', 32, '2024-10-10 13:25:00', 'pending', 'USR0020', 'RAC00000020'),
+(21, 'Poin dari daur ulang CD/DVD Bekas', 112, '2024-11-01 09:30:00', 'earned', 'USR0021', 'RAC00000021'),
+(22, 'Poin dari daur ulang Kayu Olahan', 121, '2024-11-01 10:45:00', 'spent', 'USR0022', 'RAC00000022'),
+(23, 'Poin dari daur ulang Plastik Kresek', 183, '2024-11-02 11:50:00', 'earned', 'USR0023', 'RAC00000023'),
+(24, 'Poin dari daur ulang Tutup Botol Plastik', 68, '2024-11-02 14:00:00', 'pending', 'USR0024', 'RAC00000024'),
+(25, 'Poin dari daur ulang Buku Tulis Bekas', 346, '2024-11-03 15:05:00', 'earned', 'USR0025', 'RAC00000025'),
+(26, 'Poin dari daur ulang Kaleng Cat', 110, '2024-11-03 16:10:00', 'earned', 'USR0026', 'RAC00000026'),
+(27, 'Poin dari daur ulang Pakaian Bekas', 273, '2024-11-04 09:25:00', 'spent', 'USR0027', 'RAC00000027'),
+(28, 'Poin dari daur ulang Popok Bayi', 1, '2024-11-04 10:30:00', 'earned', 'USR0028', 'RAC00000028'),
+(29, 'Poin dari daur ulang Sachet Plastik', 50, '2024-11-05 11:35:00', 'pending', 'USR0029', 'RAC00000029'),
+(30, 'Poin dari daur ulang Kabel Listrik', 132, '2024-11-05 12:40:00', 'earned', 'USR0030', 'RAC00000030'),
+(31, 'Poin dari daur ulang Filter Rokok', 0, '2024-12-01 09:00:00', 'earned', 'USR0031', 'RAC00000031'),
+(32, 'Poin dari daur ulang Cangkang Telur', 315, '2024-12-01 10:15:00', 'earned', 'USR0032', 'RAC00000032'),
+(33, 'Poin dari daur ulang Peralatan Masak Logam', 247, '2024-12-02 11:20:00', 'spent', 'USR0033', 'RAC00000033'),
+(34, 'Poin dari daur ulang Botol Infus', 300, '2024-12-02 13:30:00', 'pending', 'USR0034', 'RAC00000034'),
+(35, 'Poin dari daur ulang Stereofoam Makanan', 12, '2024-12-03 14:35:00', 'earned', 'USR0035', 'RAC00000035'),
+(36, 'Poin dari daur ulang Kaca Cermin', 136, '2024-12-03 15:40:00', 'earned', 'USR0036', 'RAC00000036'),
+(37, 'Poin dari daur ulang Jerami', 122, '2024-12-04 09:55:00', 'earned', 'USR0037', 'RAC00000037'),
+(38, 'Poin dari daur ulang Karpet Bekas', 135, '2024-12-04 11:00:00', 'pending', 'USR0038', 'RAC00000038'),
+(39, 'Poin dari daur ulang Kemasan Beling Kosmetik', 103, '2024-12-05 12:05:00', 'spent', 'USR0039', 'RAC00000039'),
+(40, 'Poin dari daur ulang Kulit Buah', 416, '2024-12-05 13:10:00', 'earned', 'USR0040', 'RAC00000040'),
+(41, 'Poin dari daur ulang Sedotan Plastik', 28, '2025-01-10 09:00:00', 'earned', 'USR0041', 'RAC00000041'),
+(42, 'Poin dari daur ulang Daun Kering', 158, '2025-01-10 10:00:00', 'earned', 'USR0042', 'RAC00000042'),
+(43, 'Poin dari daur ulang Ember Plastik Pecah', 189, '2025-01-11 11:00:00', 'pending', 'USR0043', 'RAC00000043'),
+(44, 'Poin dari daur ulang Tinta Printer', 27, '2025-01-11 12:00:00', 'spent', 'USR0044', 'RAC00000044'),
+(45, 'Poin dari daur ulang Kertas thermal', 52, '2025-01-12 13:00:00', 'earned', 'USR0045', 'RAC00000045'),
+(46, 'Poin dari daur ulang Sepatu Bekas', 186, '2025-01-12 14:00:00', 'earned', 'USR0046', 'RAC00000046'),
+(47, 'Poin dari daur ulang Ponsel Rusak', 100, '2025-01-13 15:00:00', 'earned', 'USR0047', 'RAC00000047'),
+(48, 'Poin dari daur ulang Bubble Wrap', 68, '2025-01-13 16:00:00', 'pending', 'USR0048', 'RAC00000048'),
+(49, 'Poin dari daur ulang Kertas Dupleks', 226, '2025-01-14 09:00:00', 'spent', 'USR0049', 'RAC00000049'),
+(50, 'Poin dari daur ulang Mainan Plastik Rusak', 104, '2025-01-14 10:00:00', 'earned', 'USR0050', 'RAC00000050'),
+(51, 'Poin dari daur ulang Logam Kuningan', 67, '2025-02-01 11:00:00', 'earned', 'USR0051', 'RAC00000051'),
+(52, 'Poin dari daur ulang Ampas Kopi/Teh', 211, '2025-02-01 12:00:00', 'earned', 'USR0052', 'RAC00000052'),
+(53, 'Poin dari daur ulang PVC', 252, '2025-02-02 13:00:00', 'pending', 'USR0053', 'RAC00000053'),
+(54, 'Poin dari daur ulang Kertas Minyak', 21, '2025-02-02 14:00:00', 'spent', 'USR0054', 'RAC00000054'),
+(55, 'Poin dari daur ulang Gabus Pancing', 26, '2025-02-03 15:00:00', 'earned', 'USR0055', 'RAC00000055'),
+(56, 'Poin dari daur ulang Klip Kertas Logam', 350, '2025-02-03 16:00:00', 'earned', 'USR0056', 'RAC00000056'),
+(57, 'Poin dari daur ulang Busa Spons', 16, '2025-02-04 09:00:00', 'earned', 'USR0057', 'RAC00000057'),
+(58, 'Poin dari daur ulang Tas Bekas', 220, '2025-02-04 10:00:00', 'pending', 'USR0058', 'RAC00000058'),
+(59, 'Poin dari daur ulang Kalender Bekas', 101, '2025-02-05 11:00:00', 'spent', 'USR0059', 'RAC00000059'),
+(60, 'Poin dari daur ulang Tali Plastik', 12, '2025-02-05 12:00:00', 'earned', 'USR0060', 'RAC00000060'),
+(61, 'Poin dari daur ulang Sampul Buku Plastik', 103, '2025-03-10 09:00:00', 'earned', 'USR0061', 'RAC00000061'),
+(62, 'Poin dari daur ulang Kartu Perdana Bekas', 0, '2025-03-10 10:00:00', 'earned', 'USR0062', 'RAC00000062'),
+(63, 'Poin dari daur ulang Kawat', 101, '2025-03-11 11:00:00', 'pending', 'USR0063', 'RAC00000063'),
+(64, 'Poin dari daur ulang Pecahan Keramik', 114, '2025-03-11 12:00:00', 'spent', 'USR0064', 'RAC00000064'),
+(65, 'Poin dari daur ulang Kemasan Kaca Parfum', 219, '2025-03-12 13:00:00', 'earned', 'USR0065', 'RAC00000065'),
+(66, 'Poin dari daur ulang Kertas Foto', 88, '2025-03-12 14:00:00', 'earned', 'USR0066', 'RAC00000066'),
+(67, 'Poin dari daur ulang Tisu Bekas', 6, '2025-03-13 15:00:00', 'pending', 'USR0067', 'RAC00000067'),
+(68, 'Poin dari daur ulang Galon Sekali Pakai', 193, '2025-03-13 16:00:00', 'earned', 'USR0068', 'RAC00000068'),
+(69, 'Poin dari daur ulang Mika Plastik', 187, '2025-03-14 09:00:00', 'spent', 'USR0069', 'RAC00000069'),
+(70, 'Poin dari daur ulang Ranting Pohon', 144, '2025-03-14 10:00:00', 'earned', 'USR0070', 'RAC00000070'),
+(71, 'Poin dari daur ulang Toples Plastik', 220, '2025-04-20 11:00:00', 'earned', 'USR0071', 'RAC00000071'),
+(72, 'Poin dari daur ulang Kertas NCR', 100, '2025-04-20 12:00:00', 'earned', 'USR0072', 'RAC00000072'),
+(73, 'Poin dari daur ulang Mousepad Bekas', 20, '2025-04-21 13:00:00', 'pending', 'USR0073', 'RAC00000073'),
+(74, 'Poin dari daur ulang Isi Staples', 33, '2025-04-21 14:00:00', 'spent', 'USR0074', 'RAC00000074'),
+(75, 'Poin dari daur ulang Rel Gorden Aluminium', 123, '2025-04-22 15:00:00', 'earned', 'USR0075', 'RAC00000075'),
+(76, 'Poin dari daur ulang Sikat Gigi Bekas', 19, '2025-04-22 16:00:00', 'earned', 'USR0076', 'RAC00000076'),
+(77, 'Poin dari daur ulang Kaset Pita', 30, '2025-04-23 09:00:00', 'earned', 'USR0077', 'RAC00000077'),
+(78, 'Poin dari daur ulang Kertas Amplop', 325, '2025-04-23 10:00:00', 'pending', 'USR0078', 'RAC00000078'),
+(79, 'Poin dari daur ulang Tutup Galon', 64, '2025-04-24 11:00:00', 'spent', 'USR0079', 'RAC00000079'),
+(80, 'Poin dari daur ulang Gunting Bekas', 119, '2025-04-24 12:00:00', 'earned', 'USR0080', 'RAC00000080'),
+(81, 'Poin dari daur ulang Remote TV Rusak', 61, '2025-05-15 13:00:00', 'earned', 'USR0081', 'RAC00000081'),
+(82, 'Poin dari daur ulang Jepitan Jemuran Plastik', 59, '2025-05-15 14:00:00', 'earned', 'USR0082', 'RAC00000082'),
+(83, 'Poin dari daur ulang Casing HP Plastik', 148, '2025-05-16 15:00:00', 'pending', 'USR0083', 'RAC00000083'),
+(84, 'Poin dari daur ulang Gelas Kaca Pecah', 354, '2025-05-16 16:00:00', 'spent', 'USR0084', 'RAC00000084'),
+(85, 'Poin dari daur ulang Potongan Seng', 194, '2025-05-17 09:00:00', 'earned', 'USR0085', 'RAC00000085'),
+(86, 'Poin dari daur ulang Bungkus Permen Plastik', 15, '2025-05-17 10:00:00', 'earned', 'USR0086', 'RAC00000086'),
+(87, 'Poin dari daur ulang Headphone Rusak', 34, '2025-05-18 11:00:00', 'earned', 'USR0087', 'RAC00000087'),
+(88, 'Poin dari daur ulang Gabus Buah', 46, '2025-05-18 12:00:00', 'pending', 'USR0088', 'RAC00000088'),
+(89, 'Poin dari daur ulang Hanggar Baju Plastik', 112, '2025-05-19 13:00:00', 'spent', 'USR0089', 'RAC00000089'),
+(90, 'Poin dari daur ulang Filter Air', 56, '2025-05-19 14:00:00', 'earned', 'USR0090', 'RAC00000090'),
+(91, 'Poin dari daur ulang Papan Sirkuit (PCB)', 128, '2025-06-01 09:00:00', 'earned', 'USR0091', 'RAC00000091'),
+(92, 'Poin dari daur ulang Benang Wol Sisa', 77, '2025-06-01 10:00:00', 'earned', 'USR0092', 'RAC00000092'),
+(93, 'Poin dari daur ulang Kertas Bungkus Nasi', 95, '2025-06-02 11:00:00', 'earned', 'USR0093', 'RAC00000093'),
+(94, 'Poin dari daur ulang Tali Sepatu Bekas', 7, '2025-06-02 12:00:00', 'pending', 'USR0094', 'RAC00000094'),
+(95, 'Poin dari daur ulang Asbes', 12, '2025-06-03 13:00:00', 'spent', 'USR0095', 'RAC00000095'),
+(96, 'Poin dari daur ulang Korek Api Gas Kosong', 1, '2025-06-03 14:00:00', 'earned', 'USR0096', 'RAC00000096'),
+(97, 'Poin dari daur ulang Bohlam LED', 520, '2025-06-04 15:00:00', 'earned', 'USR0097', 'RAC00000097'),
+(98, 'Poin dari daur ulang Kemasan Obat (Blister)', 39, '2025-06-04 16:00:00', 'earned', 'USR0098', 'RAC00000098'),
+(99, 'Poin dari daur ulang Paku Bekas', 746, '2025-06-05 09:00:00', 'pending', 'USR0099', 'RAC00000099'),
+(100, 'Poin dari daur ulang Tetra Pak', 126, '2025-06-15 12:00:00', 'earned', 'USR0100', 'RAC00000100');
+
+-- DUMMY DATA FOR TABLE: REWARDREDEMPTION
+-- Note: point_spent corresponds to the points_required of the redeemed item.
+INSERT INTO REWARDREDEMPTION (id, point_spent, redemption_date, processed_date, status, user_id, reward_item_id) VALUES
+('RDM00000001', 1000, '2024-11-01 15:00:00', '2024-11-01 15:05:00', 'processed', 'USR0004', 'RWD00000001'),
+('RDM00000002', 5000, '2024-11-02 12:00:00', '2024-11-02 12:10:00', 'processed', 'USR0009', 'RWD00000002'),
+('RDM00000003', 3000, '2024-11-03 10:30:00', NULL, 'pending', 'USR0012', 'RWD00000003'),
+('RDM00000004', 1500, '2024-11-04 11:00:00', '2024-11-04 11:02:00', 'processed', 'USR0017', 'RWD00000004'),
+('RDM00000005', 1500, '2024-11-05 09:00:00', '2024-11-05 09:05:00', 'processed', 'USR0019', 'RWD00000005'),
+('RDM00000006', 7500, '2024-11-06 18:00:00', NULL, 'pending', 'USR0021', 'RWD00000006'),
+('RDM00000007', 2000, '2024-11-07 14:20:00', '2024-11-07 14:25:00', 'processed', 'USR0022', 'RWD00000007'),
+('RDM00000008', 2500, '2024-11-08 16:00:00', '2024-11-08 16:10:00', 'processed', 'USR0025', 'RWD00000008'),
+('RDM00000009', 2200, '2024-11-09 13:00:00', NULL, 'pending', 'USR0026', 'RWD00000009'),
+('RDM00000010', 10000, '2024-11-10 10:00:00', '2024-11-10 10:05:00', 'processed', 'USR0046', 'RWD00000010'),
+('RDM00000011', 1000, '2024-12-01 11:00:00', '2024-12-01 11:05:00', 'processed', 'USR0011', 'RWD00000011'),
+('RDM00000012', 1800, '2024-12-02 12:30:00', '2024-12-02 12:35:00', 'processed', 'USR0033', 'RWD00000012'),
+('RDM00000013', 800, '2024-12-03 14:00:00', NULL, 'pending', 'USR0050', 'RWD00000013'),
+('RDM00000014', 2000, '2024-12-04 15:15:00', '2024-12-04 15:20:00', 'processed', 'USR0054', 'RWD00000014'),
+('RDM00000015', 4500, '2024-12-05 16:45:00', '2024-12-05 16:50:00', 'processed', 'USR0060', 'RWD00000015'),
+('RDM00000016', 500, '2024-12-06 10:00:00', NULL, 'pending', 'USR0077', 'RWD00000016'),
+('RDM00000017', 500, '2024-12-07 11:20:00', '2024-12-07 11:25:00', 'processed', 'USR0084', 'RWD00000017'),
+('RDM00000018', 1200, '2024-12-08 13:30:00', '2024-12-08 13:35:00', 'processed', 'USR0091', 'RWD00000018'),
+('RDM00000019', 4800, '2024-12-09 14:40:00', NULL, 'pending', 'USR0098', 'RWD00000019'),
+('RDM00000020', 1000, '2024-12-10 16:00:00', '2024-12-10 16:05:00', 'processed', 'USR0001', 'RWD00000020'),
+('RDM00000021', 3500, '2025-01-01 10:00:00', '2025-01-01 10:05:00', 'processed', 'USR0002', 'RWD00000021'),
+('RDM00000022', 2800, '2025-01-02 11:30:00', NULL, 'pending', 'USR0003', 'RWD00000022'),
+('RDM00000023', 8000, '2025-01-03 12:45:00', '2025-01-03 12:50:00', 'processed', 'USR0004', 'RWD00000023'),
+('RDM00000024', 1600, '2025-01-04 14:00:00', '2025-01-04 14:05:00', 'processed', 'USR0005', 'RWD00000024'),
+('RDM00000025', 2500, '2025-01-05 15:10:00', '2025-01-05 15:15:00', 'processed', 'USR0006', 'RWD00000025'),
+('RDM00000026', 2100, '2025-01-06 16:20:00', NULL, 'pending', 'USR0007', 'RWD00000026'),
+('RDM00000027', 6000, '2025-01-07 09:30:00', '2025-01-07 09:35:00', 'processed', 'USR0008', 'RWD00000027'),
+('RDM00000028', 900, '2025-01-08 10:40:00', '2025-01-08 10:45:00', 'processed', 'USR0009', 'RWD00000028'),
+('RDM00000029', 3200, '2025-01-09 11:50:00', '2025-01-09 11:55:00', 'processed', 'USR0010', 'RWD00000029'),
+('RDM00000030', 4000, '2025-01-10 13:00:00', NULL, 'pending', 'USR0011', 'RWD00000030'),
+('RDM00000031', 1500, '2025-01-11 14:15:00', '2025-01-11 14:20:00', 'processed', 'USR0012', 'RWD00000031'),
+('RDM00000032', 700, '2025-01-12 15:30:00', '2025-01-12 15:35:00', 'processed', 'USR0013', 'RWD00000032'),
+('RDM00000033', 1300, '2025-01-13 16:45:00', '2025-01-13 16:50:00', 'processed', 'USR0014', 'RWD00000033'),
+('RDM00000034', 1400, '2025-01-14 09:50:00', NULL, 'pending', 'USR0015', 'RWD00000034'),
+('RDM00000035', 2600, '2025-01-15 10:55:00', '2025-01-15 11:00:00', 'processed', 'USR0016', 'RWD00000035'),
+('RDM00000036', 2300, '2025-01-16 12:00:00', '2025-01-16 12:05:00', 'processed', 'USR0017', 'RWD00000036'),
+('RDM00000037', 9000, '2025-01-17 13:05:00', NULL, 'pending', 'USR0018', 'RWD00000037'),
+('RDM00000038', 5500, '2025-01-18 14:10:00', '2025-01-18 14:15:00', 'processed', 'USR0019', 'RWD00000038'),
+('RDM00000039', 7000, '2025-01-19 15:20:00', '2025-01-19 15:25:00', 'processed', 'USR0020', 'RWD00000039'),
+('RDM00000040', 3300, '2025-01-20 16:30:00', '2025-01-20 16:35:00', 'processed', 'USR0021', 'RWD00000040'),
+('RDM00000041', 2400, '2025-02-01 10:00:00', '2025-02-01 10:05:00', 'processed', 'USR0022', 'RWD00000041'),
+('RDM00000042', 1100, '2025-02-02 11:00:00', NULL, 'pending', 'USR0023', 'RWD00000042'),
+('RDM00000043', 6500, '2025-02-03 12:00:00', '2025-02-03 12:05:00', 'processed', 'USR0024', 'RWD00000043'),
+('RDM00000044', 800, '2025-02-04 13:00:00', '2025-02-04 13:05:00', 'processed', 'USR0025', 'RWD00000044'),
+('RDM00000045', 4200, '2025-02-05 14:00:00', '2025-02-05 14:05:00', 'processed', 'USR0026', 'RWD00000045'),
+('RDM00000046', 5800, '2025-02-06 15:00:00', NULL, 'pending', 'USR0027', 'RWD00000046'),
+('RDM00000047', 3800, '2025-02-07 16:00:00', '2025-02-07 16:05:00', 'processed', 'USR0028', 'RWD00000047'),
+('RDM00000048', 1700, '2025-02-08 09:00:00', '2025-02-08 09:05:00', 'processed', 'USR0029', 'RWD00000048'),
+('RDM00000049', 4400, '2025-02-09 10:00:00', '2025-02-09 10:05:00', 'processed', 'USR0030', 'RWD00000049'),
+('RDM00000050', 12000, '2025-02-10 11:00:00', NULL, 'pending', 'USR0031', 'RWD00000050'),
+('RDM00000051', 8500, '2025-02-11 12:00:00', '2025-02-11 12:05:00', 'processed', 'USR0032', 'RWD00000051'),
+('RDM00000052', 3100, '2025-02-12 13:00:00', '2025-02-12 13:05:00', 'processed', 'USR0033', 'RWD00000052'),
+('RDM00000053', 7800, '2025-02-13 14:00:00', '2025-02-13 14:05:00', 'processed', 'USR0034', 'RWD00000053'),
+('RDM00000054', 2900, '2025-02-14 15:00:00', NULL, 'pending', 'USR0035', 'RWD00000054'),
+('RDM00000055', 2700, '2025-02-15 16:00:00', '2025-02-15 16:05:00', 'processed', 'USR0036', 'RWD00000055'),
+('RDM00000056', 9500, '2025-02-16 09:00:00', '2025-02-16 09:05:00', 'processed', 'USR0037', 'RWD00000056'),
+('RDM00000057', 1900, '2025-02-17 10:00:00', '2025-02-17 10:05:00', 'processed', 'USR0038', 'RWD00000057'),
+('RDM00000058', 3600, '2025-02-18 11:00:00', NULL, 'pending', 'USR0039', 'RWD00000058'),
+('RDM00000059', 6800, '2025-02-19 12:00:00', '2025-02-19 12:05:00', 'processed', 'USR0040', 'RWD00000059'),
+('RDM00000060', 3400, '2025-02-20 13:00:00', '2025-02-20 13:05:00', 'processed', 'USR0041', 'RWD00000060'),
+('RDM00000061', 1300, '2025-03-01 14:00:00', '2025-03-01 14:05:00', 'processed', 'USR0042', 'RWD00000061'),
+('RDM00000062', 2100, '2025-03-02 15:00:00', '2025-03-02 15:05:00', 'processed', 'USR0043', 'RWD00000062'),
+('RDM00000063', 600, '2025-03-03 16:00:00', NULL, 'pending', 'USR0044', 'RWD00000063'),
+('RDM00000064', 4600, '2025-03-04 09:00:00', '2025-03-04 09:05:00', 'processed', 'USR0045', 'RWD00000064'),
+('RDM00000065', 8800, '2025-03-05 10:00:00', '2025-03-05 10:05:00', 'processed', 'USR0046', 'RWD00000065'),
+('RDM00000066', 3900, '2025-03-06 11:00:00', '2025-03-06 11:05:00', 'processed', 'USR0047', 'RWD00000066'),
+('RDM00000067', 4100, '2025-03-07 12:00:00', NULL, 'pending', 'USR0048', 'RWD00000067'),
+('RDM00000068', 3700, '2025-03-08 13:00:00', '2025-03-08 13:05:00', 'processed', 'USR0049', 'RWD00000068'),
+('RDM00000069', 900, '2025-03-09 14:00:00', '2025-03-09 14:05:00', 'processed', 'USR0050', 'RWD00000069'),
+('RDM00000070', 7200, '2025-03-10 15:00:00', '2025-03-10 15:05:00', 'processed', 'USR0051', 'RWD00000070'),
+('RDM00000071', 5300, '2025-03-11 16:00:00', '2025-03-11 16:05:00', 'processed', 'USR0052', 'RWD00000071'),
+('RDM00000072', 5000, '2025-03-12 09:00:00', NULL, 'pending', 'USR0053', 'RWD00000072'),
+('RDM00000073', 4900, '2025-03-13 10:00:00', '2025-03-13 10:05:00', 'processed', 'USR0054', 'RWD00000073'),
+('RDM00000074', 11000, '2025-03-14 11:00:00', '2025-03-14 11:05:00', 'processed', 'USR0055', 'RWD00000074'),
+('RDM00000075', 6200, '2025-03-15 12:00:00', '2025-03-15 12:05:00', 'processed', 'USR0056', 'RWD00000075'),
+('RDM00000076', 10500, '2025-03-16 13:00:00', NULL, 'pending', 'USR0057', 'RWD00000076'),
+('RDM00000077', 8200, '2025-03-17 14:00:00', '2025-03-17 14:05:00', 'processed', 'USR0058', 'RWD00000077'),
+('RDM00000078', 9800, '2025-03-18 15:00:00', '2025-03-18 15:05:00', 'processed', 'USR0059', 'RWD00000078'),
+('RDM00000079', 13000, '2025-03-19 16:00:00', '2025-03-19 16:05:00', 'processed', 'USR0060', 'RWD00000079'),
+('RDM00000080', 15000, '2025-03-20 09:00:00', NULL, 'pending', 'USR0061', 'RWD00000080'),
+('RDM00000081', 5200, '2025-04-01 10:00:00', '2025-04-01 10:05:00', 'processed', 'USR0062', 'RWD00000081'),
+('RDM00000082', 9200, '2025-04-02 11:00:00', '2025-04-02 11:05:00', 'processed', 'USR0063', 'RWD00000082'),
+('RDM00000083', 8600, '2025-04-03 12:00:00', '2025-04-03 12:05:00', 'processed', 'USR0064', 'RWD00000083'),
+('RDM00000084', 6600, '2025-04-04 13:00:00', NULL, 'pending', 'USR0065', 'RWD00000084'),
+('RDM00000085', 14000, '2025-04-05 14:00:00', '2025-04-05 14:05:00', 'processed', 'USR0066', 'RWD00000085'),
+('RDM00000086', 2400, '2025-04-06 15:00:00', '2025-04-06 15:05:00', 'processed', 'USR0067', 'RWD00000086'),
+('RDM00000087', 4300, '2025-04-07 16:00:00', '2025-04-07 16:05:00', 'processed', 'USR0068', 'RWD00000087'),
+('RDM00000088', 1800, '2025-04-08 09:00:00', NULL, 'pending', 'USR0069', 'RWD00000088'),
+('RDM00000089', 7700, '2025-04-09 10:00:00', '2025-04-09 10:05:00', 'processed', 'USR0070', 'RWD00000089'),
+('RDM00000090', 8900, '2025-04-10 11:00:00', '2025-04-10 11:05:00', 'processed', 'USR0071', 'RWD00000090'),
+('RDM00000091', 1700, '2025-04-11 12:00:00', '2025-04-11 12:05:00', 'processed', 'USR0072', 'RWD00000091'),
+('RDM00000092', 3000, '2025-04-12 13:00:00', '2025-04-12 13:05:00', 'processed', 'USR0073', 'RWD00000092'),
+('RDM00000093', 5100, '2025-04-13 14:00:00', NULL, 'pending', 'USR0074', 'RWD00000093'),
+('RDM00000094', 6400, '2025-04-14 15:00:00', '2025-04-14 15:05:00', 'processed', 'USR0075', 'RWD00000094'),
+('RDM00000095', 5600, '2025-04-15 16:00:00', '2025-04-15 16:05:00', 'processed', 'USR0076', 'RWD00000095'),
+('RDM00000096', 4700, '2025-04-16 09:00:00', '2025-04-16 09:05:00', 'processed', 'USR0077', 'RWD00000096'),
+('RDM00000097', 9900, '2025-04-17 10:00:00', NULL, 'pending', 'USR0078', 'RWD00000097'),
+('RDM00000098', 3500, '2025-04-18 11:00:00', '2025-04-18 11:05:00', 'processed', 'USR0079', 'RWD00000098'),
+('RDM00000099', 12500, '2025-04-19 12:00:00', '2025-04-19 12:05:00', 'processed', 'USR0080', 'RWD00000099'),
+('RDM00000100', 4500, '2025-06-15 14:00:00', NULL, 'pending', 'USR0095', 'RWD00000100');
