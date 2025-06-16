@@ -67,6 +67,7 @@ Copy folder ke: /var/www/html/waste-tracking-db-demo/
 -- Run in phpMyAdmin SQL tab
 SHOW FUNCTION STATUS WHERE Db = 'fp_mbd';
 SHOW PROCEDURE STATUS WHERE Db = 'fp_mbd';
+SHOW TRIGGERS; -- in the database
 SHOW TABLES;
 
 -- Test function
