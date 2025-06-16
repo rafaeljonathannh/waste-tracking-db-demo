@@ -44,12 +44,17 @@ class QueryHandler
             $tableName = strtoupper($tableName);
 
             if (!in_array($tableName, $allowedTables)) {
-                throw new Exception("Tabel '{$tableName}' tidak diizinkan.");
+                $errorMsg = "Table '{$tableName}' is not allowed for data retrieval.";
+                error_log("QueryHandler Error: " . $errorMsg);
+                throw new Exception($errorMsg);
             }
 
             $sql = "SELECT * FROM {$tableName} LIMIT ?";
             $stmt = $this->db->prepare($sql);
-            $stmt->execute([$limit]);
+
+            $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
+
+            $stmt->execute();
             $data = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             $countSql = "SELECT COUNT(*) as total FROM {$tableName}";
@@ -63,6 +68,8 @@ class QueryHandler
                 'count' => $total
             ];
         } catch (Exception $e) {
+            $errorMsg = "Error in getTableData for table '{$tableName}': " . $e->getMessage();
+            error_log("QueryHandler Error: " . $errorMsg);
             return [
                 'success' => false,
                 'error' => $e->getMessage()
@@ -77,7 +84,8 @@ class QueryHandler
             $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
             return $tables;
         } catch (Exception $e) {
-            error_log("Error fetching table list: " . $e->getMessage());
+            $errorMsg = "Error fetching table list: " . $e->getMessage();
+            error_log("QueryHandler Error: " . $errorMsg);
             return [];
         }
     }
@@ -101,7 +109,8 @@ class QueryHandler
 
             return $stats;
         } catch (Exception $e) {
-            error_log("Error fetching dashboard stats: " . $e->getMessage());
+            $errorMsg = "Error fetching dashboard stats: " . $e->getMessage();
+            error_log("QueryHandler Error: " . $errorMsg);
             return [
                 'total_users' => 0,
                 'total_functions' => 0,
@@ -111,6 +120,12 @@ class QueryHandler
         }
     }
 
+    /**
+     * Retrieves recent recycling activities.
+     *
+     * @param int $limit The maximum number of activities to return.
+     * @return array An array of recent activities, or an empty array on error.
+     */
     public function getRecentActivities($limit = 10)
     {
         try {
@@ -121,15 +136,24 @@ class QueryHandler
                     ORDER BY ra.timestamp DESC LIMIT ?";
 
             $stmt = $this->db->prepare($sql);
-            $stmt->execute([$limit]);
+            // Fix: Bind as integer for LIMIT
+            $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
+            $stmt->execute();
 
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (Exception $e) {
-            error_log("Error fetching recent activities: " . $e->getMessage());
+            $errorMsg = "Error fetching recent activities: " . $e->getMessage();
+            error_log("QueryHandler Error: " . $errorMsg);
             return [];
         }
     }
 
+    /**
+     * Retrieves points history.
+     *
+     * @param int $limit The maximum number of points entries to return.
+     * @return array An array of points history entries, or an empty array on error.
+     */
     public function getPointsHistory($limit = 10)
     {
         try {
@@ -140,11 +164,14 @@ class QueryHandler
                     ORDER BY p.when_earn DESC LIMIT ?";
 
             $stmt = $this->db->prepare($sql);
-            $stmt->execute([$limit]);
+            // Fix: Bind as integer for LIMIT
+            $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
+            $stmt->execute();
 
             return $stmt->fetchAll(PDO::FETCH_ASSOC);
         } catch (Exception $e) {
-            error_log("Error fetching points history: " . $e->getMessage());
+            $errorMsg = "Error fetching points history: " . $e->getMessage();
+            error_log("QueryHandler Error: " . $errorMsg);
             return [];
         }
     }

@@ -7,14 +7,14 @@ include __DIR__ . '/layouts/header.php';
     <div class="row">
         <div class="col-md-12">
             <h1 class="mb-4">🗂️ Waste Tracking Database Demo</h1>
-            
+
             <!-- Stats Cards -->
             <div class="row mb-4">
                 <div class="col-md-3">
                     <div class="card bg-primary text-white">
                         <div class="card-body">
-                            <h5>📊 Total Students</h5>
-                            <h2 id="stat-students"><?= $stats['total_students'] ?? 0 ?></h2>
+                            <h5>📊 Total Users</h5>
+                            <h2 id="stat-users"><?= $stats['total_users'] ?? 0 ?></h2>
                         </div>
                     </div>
                 </div>
@@ -70,7 +70,7 @@ include __DIR__ . '/layouts/header.php';
 
             <!-- Tab Content -->
             <div class="tab-content" id="mainTabContent">
-                
+
                 <!-- Functions Tab -->
                 <div class="tab-pane fade show active" id="functions" role="tabpanel">
                     <div class="card mt-3">
@@ -86,30 +86,30 @@ include __DIR__ . '/layouts/header.php';
                                             <select class="form-select" name="function_name" required>
                                                 <option value="">Choose a function...</option>
                                                 <?php foreach ($functions as $func => $desc): ?>
-                                                    <option value="<?= $func ?>"><?= $desc ?></option>
+                                                    <option value="<?= htmlspecialchars($func) ?>"><?= htmlspecialchars($desc) ?></option>
                                                 <?php endforeach; ?>
                                             </select>
                                         </div>
-                                        
+
                                         <div class="mb-3">
                                             <label class="form-label">Parameters:</label>
                                             <input type="text" class="form-control" name="param1" placeholder="Parameter 1">
                                             <input type="text" class="form-control mt-2" name="param2" placeholder="Parameter 2 (optional)">
                                             <input type="text" class="form-control mt-2" name="param3" placeholder="Parameter 3 (optional)">
                                         </div>
-                                        
+
                                         <button type="submit" class="btn btn-primary">Execute Function</button>
-                                        
+
                                         <div class="mt-3">
                                             <h6>Quick Tests:</h6>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('total_poin_mahasiswa', '1')">
-                                                total_poin_mahasiswa(1)
+                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('hitung_total_poin_user', 'USR000000001')">
+                                                hitung_total_poin_user('USR000000001')
                                             </button>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('jumlah_kampanye_mahasiswa', '1')">
-                                                jumlah_kampanye_mahasiswa(1)
+                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('hitung_jumlah_kampanye_diikuti', 'USR000000001')">
+                                                hitung_jumlah_kampanye_diikuti('USR000000001')
                                             </button>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('status_mahasiswa', '1')">
-                                                status_mahasiswa(1)
+                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('dapatkan_status_user', 'USR000000001')">
+                                                dapatkan_status_user('USR000000001')
                                             </button>
                                         </div>
                                     </form>
@@ -140,19 +140,23 @@ include __DIR__ . '/layouts/header.php';
                                             <select class="form-select" name="procedure_name" required>
                                                 <option value="">Choose a procedure...</option>
                                                 <?php foreach ($procedures as $proc => $desc): ?>
-                                                    <option value="<?= $proc ?>"><?= $desc ?></option>
+                                                    <option value="<?= htmlspecialchars($proc) ?>"><?= htmlspecialchars($desc) ?></option>
                                                 <?php endforeach; ?>
                                             </select>
                                         </div>
-                                        
+
                                         <div class="mb-3">
                                             <label class="form-label">Parameters:</label>
                                             <input type="text" class="form-control" name="param1" placeholder="Parameter 1">
                                             <input type="text" class="form-control mt-2" name="param2" placeholder="Parameter 2 (optional)">
                                             <input type="text" class="form-control mt-2" name="param3" placeholder="Parameter 3 (optional)">
                                             <input type="text" class="form-control mt-2" name="param4" placeholder="Parameter 4 (optional)">
+                                            <input type="text" class="form-control mt-2" name="param5" placeholder="Parameter 5 (optional)">
+                                            <input type="text" class="form-control mt-2" name="param6" placeholder="Parameter 6 (optional)">
+                                            <input type="text" class="form-control mt-2" name="param7" placeholder="Parameter 7 (optional)">
+                                            <input type="text" class="form-control mt-2" name="param8" placeholder="Parameter 8 (optional)">
                                         </div>
-                                        
+
                                         <button type="submit" class="btn btn-success">Execute Procedure</button>
                                     </form>
                                 </div>
@@ -179,7 +183,7 @@ include __DIR__ . '/layouts/header.php';
                                 <select class="form-select" id="table-select" onchange="loadTable(this.value)">
                                     <option value="">Choose a table...</option>
                                     <?php foreach ($tables as $table): ?>
-                                        <option value="<?= $table ?>"><?= $table ?></option>
+                                        <option value="<?= htmlspecialchars($table) ?>"><?= htmlspecialchars($table) ?></option>
                                     <?php endforeach; ?>
                                 </select>
                             </div>
@@ -212,180 +216,252 @@ include __DIR__ . '/layouts/header.php';
 </div>
 
 <script>
-// Wait for document ready
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('🚀 Dashboard loaded successfully');
-    
-    // Function Form Handler  
-    const functionForm = document.getElementById('function-form');
-    if (functionForm) {
-        functionForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const resultDiv = document.getElementById('function-result');
-            resultDiv.innerHTML = '⏳ Executing function...';
-            
-            const formData = new FormData(this);
-            
-            fetch('?action=test_function', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Function result:', data);
-                resultDiv.innerHTML = formatResult(data);
-            })
-            .catch(error => {
-                console.error('Function error:', error);
-                resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
-            });
-        });
-    }
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log('🚀 Dashboard loaded successfully');
 
-    // Procedure Form Handler
-    const procedureForm = document.getElementById('procedure-form');
-    if (procedureForm) {
-        procedureForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const resultDiv = document.getElementById('procedure-result');
-            resultDiv.innerHTML = '⏳ Executing procedure...';
-            
-            const formData = new FormData(this);
-            
-            fetch('?action=test_procedure', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log('Procedure result:', data);
-                resultDiv.innerHTML = formatResult(data);
-            })
-            .catch(error => {
-                console.error('Procedure error:', error);
-                resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
-            });
-        });
-    }
-});
+        const functionForm = document.getElementById('function-form');
+        if (functionForm) {
+            functionForm.addEventListener('submit', function(e) {
+                e.preventDefault();
 
-// Quick test function
-function quickTestFunction(functionName, params) {
-    console.log('Quick test:', functionName, params);
-    
-    const resultDiv = document.getElementById('function-result');
-    resultDiv.innerHTML = '⏳ Testing ' + functionName + '...';
-    
-    const formData = new FormData();
-    formData.append('function_name', functionName);
-    formData.append('param1', params);
-    
-    fetch('?action=test_function', {
-        method: 'POST',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        console.log('Quick test result:', data);
-        resultDiv.innerHTML = formatResult(data);
-    })
-    .catch(error => {
-        console.error('Quick test error:', error);
-        resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
+                const resultDiv = document.getElementById('function-result');
+                resultDiv.innerHTML = '⏳ Executing function...';
+
+                const formData = new FormData(this);
+                const functionName = formData.get('function_name');
+
+                fetch('?action=test_function', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Function result:', data);
+                        resultDiv.innerHTML = formatResult(data, functionName);
+                    })
+                    .catch(error => {
+                        console.error('Function error:', error);
+                        resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
+                    });
+            });
+        }
+
+        // Procedure Form Handler
+        const procedureForm = document.getElementById('procedure-form');
+        if (procedureForm) {
+            procedureForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+
+                const resultDiv = document.getElementById('procedure-result');
+                resultDiv.innerHTML = '⏳ Executing procedure...';
+
+                const formData = new FormData(this);
+                const procedureName = formData.get('procedure_name');
+
+                fetch('?action=test_procedure', {
+                        method: 'POST',
+                        body: formData
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log('Procedure result:', data);
+                        resultDiv.innerHTML = formatResult(data, procedureName);
+                    })
+                    .catch(error => {
+                        console.error('Procedure error:', error);
+                        resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
+                    });
+            });
+        }
     });
-}
 
-// Load table data
-function loadTable(tableName) {
-    if (!tableName) return;
-    
-    const contentDiv = document.getElementById('table-content');
-    contentDiv.innerHTML = '⏳ Loading ' + tableName + ' data...';
-    
-    fetch('?action=view_table&table=' + tableName)
-    .then(response => response.json())
-    .then(data => {
-        console.log('Table data:', data);
-        if (data.success && data.data.length > 0) {
-            let html = '<h6>Table: ' + tableName + ' (' + data.count + ' rows)</h6>';
-            html += '<div class="table-responsive"><table class="table table-striped table-sm">';
-            html += '<thead class="table-dark"><tr>';
-            
-            // Headers
-            Object.keys(data.data[0]).forEach(key => {
-                html += '<th>' + key + '</th>';
+    // Quick test function
+    function quickTestFunction(functionName, params) {
+        console.log('Quick test:', functionName, params);
+
+        const resultDiv = document.getElementById('function-result');
+        resultDiv.innerHTML = '⏳ Testing ' + functionName + '...';
+
+        const formData = new FormData();
+        formData.append('function_name', functionName);
+        formData.append('param1', params);
+
+        fetch('?action=test_function', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Quick test result:', data);
+                resultDiv.innerHTML = formatResult(data, functionName);
+            })
+            .catch(error => {
+                console.error('Quick test error:', error);
+                resultDiv.innerHTML = '<div class="alert alert-danger">Request failed: ' + error + '</div>';
             });
-            html += '</tr></thead><tbody>';
-            
-            // Data rows (limit to 20 for display)
-            data.data.slice(0, 20).forEach(row => {
-                html += '<tr>';
-                Object.values(row).forEach(value => {
-                    html += '<td>' + (value || '-') + '</td>';
-                });
-                html += '</tr>';
+    }
+
+    // Load table data
+    function loadTable(tableName) {
+        if (!tableName) return;
+
+        const contentDiv = document.getElementById('table-content');
+        contentDiv.innerHTML = '⏳ Loading ' + tableName + ' data...';
+
+        fetch('?action=view_table&table=' + tableName)
+            .then(response => {
+                // Log the raw response status and headers
+                console.log('Fetch Response Status:', response.status);
+                console.log('Fetch Response Headers:', [...response.headers.entries()]);
+                return response.json(); // Proceed to parse JSON
+            })
+            .then(data => {
+                console.log('Table data (parsed JSON):', data); // This is critical: inspect this object!
+
+                if (data.success && Array.isArray(data.data) && data.data.length > 0) {
+                    let html = '<h6>Table: ' + tableName + ' (' + data.count + ' rows)</h6>';
+                    html += '<div class="table-responsive"><table class="table table-striped table-sm">';
+                    html += '<thead class="table-dark"><tr>';
+
+                    Object.keys(data.data[0]).forEach(key => {
+                        html += '<th>' + htmlspecialchars(key) + '</th>';
+                    });
+                    html += '</tr></thead><tbody>';
+
+                    // Data rows (limit to 20 for display)
+                    data.data.slice(0, 20).forEach(row => {
+                        html += '<tr>';
+                        Object.values(row).forEach(value => {
+                            html += '<td>' + htmlspecialchars(value || '-') + '</td>';
+                        });
+                        html += '</tr>';
+                    });
+
+                    html += '</tbody></table></div>';
+                    if (data.count > 20) {
+                        html += '<p class="text-muted">Showing first 20 of ' + data.count + ' rows</p>';
+                    }
+                    contentDiv.innerHTML = html;
+                } else {
+                    let message = 'No data found.';
+                    if (data.error) {
+                        message = 'Error: ' + htmlspecialchars(data.error); // Display backend error
+                    } else if (data.success === false) {
+                        message = 'Operation failed with no specific error message.';
+                    }
+                    contentDiv.innerHTML = '<div class="alert alert-warning">' + message + '</div>';
+                }
+            })
+            .catch(error => {
+                console.error('Table load error:', error);
+                contentDiv.innerHTML = '<div class="alert alert-danger">Failed to load table data: ' + htmlspecialchars(error.message || error) + '</div>';
             });
-            
-            html += '</tbody></table></div>';
-            if (data.count > 20) {
-                html += '<p class="text-muted">Showing first 20 of ' + data.count + ' rows</p>';
+    }
+
+
+    function htmlspecialchars(str) {
+        if (typeof str != 'string' && typeof str != 'number') return str; // Also handle numbers
+        str = String(str); // Ensure it's a string
+        var map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return str.replace(/[&<>"']/g, function(m) {
+            return map[m];
+        });
+    }
+
+    // Format result display - Now accepts routineName (function or procedure name)
+    function formatResult(data, routineName = null) {
+        if (!data) return '<div class="alert alert-danger">No response received</div>';
+
+        let html = '';
+
+        if (data.success) {
+            html += '<div class="alert alert-success"><strong>✅ SUCCESS</strong></div>';
+
+            // Custom messages for Stored Procedures
+            if (routineName && routineName.startsWith('sp_')) {
+                html += '<h6>Executed Stored Procedure: ' + htmlspecialchars(routineName) + '</h6>';
+                html += '<div class="mb-2"><strong>Parameters:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.params, null, 2)) + '</pre></div>';
+
+                switch (routineName) {
+                    case 'sp_redeem_reward':
+                        html += '<div class="mb-2"><strong>Action:</strong> Poin pengguna dikurangi dan penukaran reward dicatat. Status awal penukaran: Pending.</div>';
+                        break;
+                    case 'sp_laporkan_aktivitas_sampah':
+                        html += '<div class="mb-2"><strong>Action:</strong> Aktivitas pelaporan sampah baru telah dicatat. Poin akan ditambahkan setelah verifikasi.</div>';
+                        break;
+                    case 'sp_ikut_kampanye':
+                        html += '<div class="mb-2"><strong>Action:</strong> Pengguna berhasil didaftarkan ke kampanye.</div>';
+                        break;
+                    case 'sp_update_user_status':
+                        html += '<div class="mb-2"><strong>Action:</strong> Status pengguna dengan ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code> telah diperbarui berdasarkan aktivitas terakhir.</div>';
+                        break;
+                    case 'sp_create_campaign_with_coordinator_check':
+                        html += '<div class="mb-2"><strong>Action:</strong> Kampanye keberlanjutan baru telah berhasil dibuat.</div>';
+                        break;
+                    case 'sp_generate_user_summary':
+                        html += '<div class="mb-2"><strong>Action:</strong> Ringkasan pengguna telah dihasilkan.</div>';
+                        if (data.results && data.results.length > 0 && data.results[0].length > 0) {
+                            html += '<h6>Summary:</h6><pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.results[0][0], null, 2)) + '</pre>';
+                        } else {
+                            html += '<div class="alert alert-info">No summary data returned.</div>';
+                        }
+                        break;
+                    case 'sp_add_recycling_bin':
+                        html += '<div class="mb-2"><strong>Action:</strong> Tempat sampah daur ulang baru telah ditambahkan.</div>';
+                        break;
+                    case 'sp_complete_redemption':
+                        html += '<div class="mb-2"><strong>Action:</strong> Penukaran reward dengan ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code> telah ditandai sebagai \'completed\'.</div>';
+                        break;
+                    default:
+                        html += '<div class="mb-2"><strong>Procedure Results:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.results, null, 2)) + '</pre></div>';
+                        break;
+                }
+            } else { // For Functions
+                html += '<h6>Executed Function: ' + htmlspecialchars(routineName || 'N/A') + '</h6>';
+                html += '<div class="mb-2"><strong>Result:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.result, null, 2)) + '</pre></div>';
+                if (data.params && data.params.length > 0) {
+                    html += '<div class="mb-2"><strong>Parameters:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.params, null, 2)) + '</pre></div>';
+                }
             }
-            contentDiv.innerHTML = html;
+
+            if (data.query) {
+                html += '<div class="mb-2"><strong>Query:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(data.query) + '</pre></div>';
+            }
+
         } else {
-            contentDiv.innerHTML = '<div class="alert alert-warning">No data found</div>';
+            html += '<div class="alert alert-danger"><strong>❌ ERROR</strong></div>';
+            html += '<div class="mb-2"><strong>Error:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(data.error || 'Unknown error') + '</pre></div>';
+            if (data.query) {
+                html += '<div class="mb-2"><strong>Query:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(data.query) + '</pre></div>';
+            }
         }
-    })
-    .catch(error => {
-        console.error('Table load error:', error);
-        contentDiv.innerHTML = '<div class="alert alert-danger">Failed to load table data</div>';
-    });
-}
 
-// Format result display
-function formatResult(data) {
-    if (!data) return '<div class="alert alert-danger">No response received</div>';
-    
-    let html = '';
-    
-    if (data.success) {
-        html += '<div class="alert alert-success"><strong>✅ SUCCESS</strong></div>';
-        html += '<div class="mb-2"><strong>Result:</strong> <code>' + JSON.stringify(data.result) + '</code></div>';
-        if (data.query) {
-            html += '<div class="mb-2"><strong>Query:</strong> <code>' + data.query + '</code></div>';
-        }
-        if (data.params && data.params.length > 0) {
-            html += '<div class="mb-2"><strong>Parameters:</strong> <code>' + JSON.stringify(data.params) + '</code></div>';
-        }
-    } else {
-        html += '<div class="alert alert-danger"><strong>❌ ERROR</strong></div>';
-        html += '<div class="mb-2"><strong>Error:</strong> <code>' + (data.error || 'Unknown error') + '</code></div>';
-        if (data.query) {
-            html += '<div class="mb-2"><strong>Query:</strong> <code>' + data.query + '</code></div>';
-        }
+        return html;
     }
-    
-    return html;
-}
 
-// Auto-update stats every 30 seconds
-setInterval(function() {
-    fetch('?action=get_stats')
-    .then(response => response.json())
-    .then(data => {
-        if (data.success && data.data) {
-            const stats = data.data;
-            document.getElementById('stat-students').textContent = stats.total_students || 0;
-            document.getElementById('stat-functions').textContent = stats.total_functions || 0;
-            document.getElementById('stat-procedures').textContent = stats.total_procedures || 0;
-            document.getElementById('stat-tables').textContent = stats.total_tables || 0;
-        }
-    })
-    .catch(error => console.log('Stats update failed:', error));
-}, 30000);
+    // Auto-update stats every 30 seconds
+    setInterval(function() {
+        fetch('?action=get_stats')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.data) {
+                    const stats = data.data;
+                    document.getElementById('stat-users').textContent = stats.total_users || 0;
+                    document.getElementById('stat-functions').textContent = stats.total_functions || 0;
+                    document.getElementById('stat-procedures').textContent = stats.total_procedures || 0;
+                    document.getElementById('stat-tables').textContent = stats.total_tables || 0;
+                }
+            })
+            .catch(error => console.log('Stats update failed:', error));
+    }, 30000);
 
-console.log('🎯 All JavaScript loaded successfully');
+    console.log('🎯 All JavaScript loaded successfully');
 </script>
 
 <?php include __DIR__ . '/layouts/footer.php'; ?>

@@ -1,16 +1,32 @@
 <?php
-require_once __DIR__ . '/../models/DatabaseModel.php';
 
-class MainController {
-    private $model;
-    
-    public function __construct() {
-        $this->model = new DatabaseModel();
+namespace App;
+
+require_once __DIR__ . '/../models/Functions.php';
+require_once __DIR__ . '/../models/StoredProcedures.php';
+require_once __DIR__ . '/../models/QueryHandler.php';
+
+use App\Functions;
+use App\StoredProcedures;
+use App\QueryHandler;
+
+class MainController
+{
+    private $functions;
+    private $procedures;
+    private $queryHandler;
+
+    public function __construct()
+    {
+        $this->functions = new Functions();
+        $this->procedures = new StoredProcedures();
+        $this->queryHandler = new QueryHandler();
     }
 
-    public function handleRequest() {
+    public function handleRequest()
+    {
         $action = $_GET['action'] ?? 'dashboard';
-        
+
         switch ($action) {
             case 'dashboard':
                 $this->dashboard();
@@ -38,88 +54,94 @@ class MainController {
         }
     }
 
-    private function dashboard() {
-        $stats = $this->model->getDashboardStats();
-        $functions = $this->model->getAllFunctions();
-        $procedures = $this->model->getAllProcedures();
-        $tables = $this->model->getTableList();
-        
+    private function dashboard()
+    {
+        $stats = $this->queryHandler->getDashboardStats();
+        $functions = $this->functions->getAllFunctions();
+        $procedures = $this->procedures->getAllProcedures();
+        $tables = $this->queryHandler->getTableList();
+
         include __DIR__ . '/../views/dashboard.php';
     }
 
-    private function testFunction() {
+    private function testFunction()
+    {
         header('Content-Type: application/json');
-        
+
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            echo json_encode(['success' => false, 'error' => 'Method not allowed']);
+            echo json_encode(['success' => false, 'error' => 'Method not allowed. Use POST.']);
             return;
         }
-        
+
         $functionName = $_POST['function_name'] ?? '';
         $params = [];
-        
-        for ($i = 1; $i <= 5; $i++) {
+
+        for ($i = 1; $i <= 8; $i++) {
             $paramValue = $_POST["param{$i}"] ?? '';
             if ($paramValue !== '') {
                 $params[] = $paramValue;
             }
         }
-        
-        $result = $this->model->testFunction($functionName, $params);
+
+        $result = $this->functions->testFunction($functionName, $params);
         echo json_encode($result);
     }
 
-    private function testProcedure() {
+    private function testProcedure()
+    {
         header('Content-Type: application/json');
-        
+
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-            echo json_encode(['success' => false, 'error' => 'Method not allowed']);
+            echo json_encode(['success' => false, 'error' => 'Method not allowed. Use POST.']);
             return;
         }
-        
+
         $procedureName = $_POST['procedure_name'] ?? '';
         $params = [];
-        
-        for ($i = 1; $i <= 5; $i++) {
+
+        for ($i = 1; $i <= 8; $i++) {
             $paramValue = $_POST["param{$i}"] ?? '';
             if ($paramValue !== '') {
                 $params[] = $paramValue;
             }
         }
-        
-        $result = $this->model->testProcedure($procedureName, $params);
+
+        $result = $this->procedures->testProcedure($procedureName, $params);
         echo json_encode($result);
     }
 
-    private function viewTable() {
+    private function viewTable()
+    {
         header('Content-Type: application/json');
-        
+
         $tableName = $_GET['table'] ?? '';
         $limit = $_GET['limit'] ?? 50;
-        
-        $result = $this->model->getTableData($tableName, $limit);
+
+        $result = $this->queryHandler->getTableData($tableName, $limit);
         echo json_encode($result);
     }
 
-    private function getStats() {
+    private function getStats()
+    {
         header('Content-Type: application/json');
-        
-        $stats = $this->model->getDashboardStats();
+
+        $stats = $this->queryHandler->getDashboardStats();
         echo json_encode(['success' => true, 'data' => $stats]);
     }
 
-    private function getRecentActivities() {
+    private function getRecentActivities()
+    {
         header('Content-Type: application/json');
-        
-        $activities = $this->model->getRecentActivities();
+
+        $activities = $this->queryHandler->getRecentActivities();
         echo json_encode(['success' => true, 'data' => $activities]);
     }
 
-    private function getPointsHistory() {
+    private function getPointsHistory()
+    {
         header('Content-Type: application/json');
-        
-        $history = $this->model->getPointsHistory();
+
+        $history = $this->queryHandler->getPointsHistory();
         echo json_encode(['success' => true, 'data' => $history]);
     }
 }
-?>
