@@ -9,7 +9,7 @@
 ### Step 1: Clone Repository
 ```bash
 # Clone repository
-git clone https://github.com/your-username/waste-tracking-db-demo.git
+git clone https://github.com/rafaeljonathannh/waste-tracking-db-demo.git
 cd waste-tracking-db-demo
 
 # Atau download ZIP dan extract ke folder htdocs
@@ -44,7 +44,7 @@ Copy folder ke: /var/www/html/waste-tracking-db-demo/
 4. Collation: `utf8mb4_general_ci`
 5. Click **"Create"**
 
-#### 4.2 Import Schema
+#### 4.2 Import Database and Schema
 1. Select database `fp_mbd`
 2. Click **"Import"** tab
 3. Choose file: `database/fp_mbdFIX.sql`
@@ -52,7 +52,17 @@ Copy folder ke: /var/www/html/waste-tracking-db-demo/
 5. Import again: `database/schema_fixes.sql`
 6. Click **"Go"**
 
-#### 4.3 Verify Import
+#### 4.3 Import Function, Stored Procedure, and Trigger
+1. Select database `fp_mbd`
+2. Click **"Import"** tab
+3. Choose file: `database/extra/func.sql`
+4. Click **"Go"**
+5. Choose file: `database/extra/sp.sql`
+6. Click **"Go"**
+7. Choose file: `database/extra/trigger.sql`
+8. Click **"Go"**
+
+#### 4.4 Verify Import
 ```sql
 -- Run in phpMyAdmin SQL tab
 SHOW FUNCTION STATUS WHERE Db = 'fp_mbd';
