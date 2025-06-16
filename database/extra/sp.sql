@@ -2,44 +2,54 @@
 DELIMITER //
 
 CREATE PROCEDURE sp_redeem_reward (
-    IN p_user_id INT,
-    IN p_reward_id INT
+    IN p_user_id CHAR(12),
+    IN p_reward_item_id CHAR(12) 
 )
 BEGIN
-    DECLARE v_status VARCHAR(20);
+    DECLARE v_user_status CHAR(8); 
     DECLARE v_required_points INT;
     DECLARE v_discounted_points INT;
     DECLARE v_total_points INT;
+    DECLARE v_reward_item_stock INT;
 
-    -- 1. Get student status
-    SET v_status = status_mahasiswa(p_user_id);
+    -- 1. Get user status
+    SET v_user_status = dapatkan_status_user(p_user_id);
 
-    -- 2. Get reward cost
-    SELECT points_required INTO v_required_points
+    -- 2. Get reward item details
+    SELECT points_required, stock INTO v_required_points, v_reward_item_stock
     FROM REWARD_ITEM
-    WHERE reward_id = p_reward_id;
+    WHERE id = p_reward_item_id; 
 
-    -- 3. Apply discount based on student status
-    SET v_discounted_points = fn_hitung_diskon_reward(v_status, v_required_points);
+    -- Check if reward item exists and is in stock
+    IF v_required_points IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reward item not found.';
+    END IF;
 
-    -- 4. Get total available points
+    IF v_reward_item_stock <= 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Reward item is out of stock.';
+    END IF;
+
+    -- 3. Apply discount based on user status 
+    SET v_discounted_points = hitung_diskon_reward(v_user_status, v_required_points);
+
+    -- 4. Get total available points from USERR table
     SELECT total_points INTO v_total_points
-    FROM STUDENT
-    WHERE stud_id = p_user_id;
+    FROM USERR 
+    WHERE id = p_user_id; 
 
     -- 5. Check if sufficient points
     IF v_total_points IS NULL OR v_total_points < v_discounted_points THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient points for redemption';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Poin tidak cukup untuk penukaran.';
     END IF;
 
-    -- 6. Deduct points directly from STUDENT table
-    UPDATE STUDENT
+    -- 6. Deduct points directly from USERR table
+    UPDATE USERR 
     SET total_points = total_points - v_discounted_points
-    WHERE stud_id = p_user_id;
+    WHERE id = p_user_id; 
 
     -- 7. Insert redemption log
-    INSERT INTO REWARDREDEMPTION (user_id, reward_id, redeemed_at, status)
-    VALUES (p_user_id, p_reward_id, NOW(), 'completed');
+    INSERT INTO REWARDREDEMPTION (id, user_id, reward_item_id, point_spent, redemption_date, status)
+    VALUES (UUID(), p_user_id, p_reward_item_id, v_discounted_points, NOW(), 'pending'); -- UUID() -> id generator
 END;
 //
 DELIMITER ;
@@ -48,25 +58,38 @@ DELIMITER ;
 DELIMITER $$
 
 CREATE PROCEDURE sp_laporkan_aktivitas_sampah(
-    IN p_user_id INT,
-    IN p_bin_id INT,
-    IN p_weight DECIMAL(5,2),
-    IN p_status ENUM('pending', 'verified')
+    IN p_user_id CHAR(12),
+    IN p_recycling_bin_id CHAR(12), 
+    IN p_waste_type_id CHAR(12), 
+    IN p_weight_kg DECIMAL(5,2), 
+    IN p_admin_id CHAR(12), 
+    IN p_verification_staff CHAR(8)
 )
 BEGIN
-    DECLARE v_poin INT;
-
-    -- Insert activity
-    INSERT INTO RECYCLINGACTIVITY(user_id, recyclebin_id, weight_kg, status, timestamp)
-    VALUES (p_user_id, p_bin_id, p_weight, p_status, NOW());
-
-    -- Insert point if verified
-    IF p_status = 'verified' THEN
-        SET v_poin = fn_konversi_berat_ke_poin(p_weight);
-
-        INSERT INTO BYN(user_id, campaign_id, point_amount, timestamp)
-        VALUES (p_user_id, NULL, v_poin, NOW()); -- NULL if not tied to a campaign
-    END IF;
+    -- Masukkan aktivitas daur ulang baru.
+    -- Trigger `trg_verifikasi_aktivitas_to_poin` akan menangani penambahan poin
+    INSERT INTO RECYCLING_ACTIVITY (
+        id, 
+        weight_kg,
+        points_earned, 
+        timestamp,
+        verification_staff,
+        admin_id,
+        user_id,
+        waste_type_id,
+        recycling_bin_id
+    )
+    VALUES (
+        UUID(), -- Generate a unique ID
+        p_weight_kg,
+        0, -- Initial points can be 0, updated by trigger on verification
+        NOW(),
+        p_verification_staff,
+        p_admin_id,
+        p_user_id,
+        p_waste_type_id,
+        p_recycling_bin_id
+    );
 END$$
 
 DELIMITER ;
@@ -75,16 +98,14 @@ DELIMITER ;
 DELIMITER $$
 
 CREATE PROCEDURE sp_ikut_kampanye(
-    IN p_user_id INT,
-    IN p_campaign_id INT
+    IN p_user_id CHAR(12), 
+    IN p_sustainability_campaign_id CHAR(12)
 )
 BEGIN
-    IF ikut_kampanye(p_user_id, p_campaign_id) THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Mahasiswa sudah terdaftar di kampanye ini.';
-    ELSE
-        INSERT INTO USER_SUSTAINABILITY_CAMPAIGN(user_id, campaign_id, status)
-        VALUES (p_user_id, p_campaign_id, 'active');
-    END IF;
+    -- Langsung coba masukkan data.
+    -- Trigger `trg_prevent_duplicate_campaign_join` akan otomatis
+    INSERT INTO USER_SUSTAINABILITY_CAMPAIGN(id, user_id, sustainability_campaign_id, status)
+    VALUES (UUID(), p_user_id, p_sustainability_campaign_id, 'active'); 
 END$$
 
 DELIMITER ;
@@ -92,20 +113,22 @@ DELIMITER ;
 -- sp_update_student_status
 DELIMITER //
 
-CREATE PROCEDURE sp_update_student_status(
-    IN p_user_id INT
+CREATE PROCEDURE sp_update_user_status( 
+    IN p_user_id CHAR(12) 
 )
 BEGIN
-    DECLARE v_last_activity TIMESTAMP;
+    DECLARE v_last_activity DATETIME; 
 
+    -- Dapatkan waktu aktivitas daur ulang terakhir pengguna
     SELECT MAX(timestamp) INTO v_last_activity
-    FROM RECYCLINGACTIVITY
+    FROM RECYCLING_ACTIVITY
     WHERE user_id = p_user_id;
 
+    -- Perbarui status pengguna di tabel USERR
     IF v_last_activity IS NULL OR v_last_activity < DATE_SUB(NOW(), INTERVAL 6 MONTH) THEN
-        UPDATE STUDENT SET status = 'inactive' WHERE stud_id = p_user_id;
+        UPDATE USERR SET status = 'inactive' WHERE id = p_user_id; 
     ELSE
-        UPDATE STUDENT SET status = 'active' WHERE stud_id = p_user_id;
+        UPDATE USERR SET status = 'active' WHERE id = p_user_id; 
     END IF;
 END;
 //
@@ -115,24 +138,45 @@ DELIMITER ;
 DELIMITER //
 
 CREATE PROCEDURE sp_create_campaign_with_coordinator_check(
-    IN p_staff_id INT,
-    IN p_faculty_id INT,
-    IN p_name VARCHAR(255),
-    IN p_description TEXT,
-    IN p_start_date DATE,
-    IN p_end_date DATE
+    IN p_sustainability_coordinator_id CHAR(12), 
+    IN p_title VARCHAR(50), 
+    IN p_description VARCHAR(255), 
+    IN p_start_date DATETIME, 
+    IN p_end_date DATETIME, 
+    IN p_target_waste_reduction DECIMAL(6,2), 
+    IN p_bonus_points INT, 
+    IN p_status CHAR(9) 
 )
 BEGIN
-    DECLARE v_count INT;
-
-    SET v_count = jumlah_koordinator_fakultas(p_faculty_id);
-
-    IF v_count = 0 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Faculty must have at least one coordinator.';
+    IF NOT EXISTS (SELECT 1 FROM SUSTAINABILITY_COORDINATOR WHERE id = p_sustainability_coordinator_id) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Invalid sustainability coordinator ID provided.';
     END IF;
 
-    INSERT INTO SUSTAINABILITY_CAMPAIGN(name, description, start_date, end_date, created_by)
-    VALUES (p_name, p_description, p_start_date, p_end_date, p_staff_id);
+    -- Masukkan kampanye baru
+    INSERT INTO SUSTAINABILITY_CAMPAIGN(
+        id,
+        title,
+        description,
+        start_date,
+        end_date,
+        target_waste_reduction,
+        bonus_points,
+        status,
+        created_by, 
+        sustainability_coordinator_id
+    )
+    VALUES (
+        UUID(),
+        p_title,
+        p_description,
+        p_start_date,
+        p_end_date,
+        p_target_waste_reduction,
+        p_bonus_points,
+        p_status,
+        NULL,
+        p_sustainability_coordinator_id
+    );
 END;
 //
 DELIMITER ;
@@ -140,37 +184,56 @@ DELIMITER ;
 -- sp_generate_student_summary
 DELIMITER //
 
-CREATE PROCEDURE sp_generate_student_summary(IN p_user_id INT)
+CREATE PROCEDURE sp_generate_user_summary(
+    IN p_user_id CHAR(12)
+) 
 BEGIN
-    SELECT 
-        total_poin_mahasiswa(p_user_id) AS total_points,
-        jumlah_kampanye_mahasiswa(p_user_id) AS total_campaigns_joined,
-        total_sampah_disetor(p_user_id) AS total_waste_kg,
-        jumlah_reward_ditukar(p_user_id) AS total_rewards_redeemed,
-        status_mahasiswa(p_user_id) AS status;
+    SELECT
+        hitung_total_poin_user(p_user_id) AS total_points,
+        hitung_jumlah_kampanye_diikuti(p_user_id) AS total_campaigns_joined,
+        hitung_total_sampah_disetor(p_user_id) AS total_waste_kg,
+        hitung_jumlah_reward_ditukar(p_user_id) AS total_rewards_redeemed,
+        dapatkan_status_user(p_user_id) AS status; 
 END;
 //
 DELIMITER ;
 
--- sp_add_bin_check_capacity
+-- sp_add_recycling_bin
 DELIMITER //
 
-CREATE PROCEDURE sp_add_bin_check_capacity(
-    IN p_location_id INT,
-    IN p_capacity_kg DECIMAL(6,2),
-    IN p_bin_code VARCHAR(50)
+CREATE PROCEDURE sp_add_recycling_bin( 
+    IN p_bin_location_id CHAR(12), 
+    IN p_capacity_kg DECIMAL(5,2), 
+    IN p_qr_code VARCHAR(100) 
 )
 BEGIN
-    DECLARE v_total_capacity DECIMAL(10,2);
+    DECLARE v_total_capacity DECIMAL(6,2);
 
-    SET v_total_capacity = kapasitas_total_tempat_sampah(p_location_id);
+    -- Mendapatkan total kapasitas tempat sampah yang sudah ada di lokasi ini
+    SET v_total_capacity = hitung_kapasitas_total_lokasi(p_bin_location_id);
 
-    IF (v_total_capacity + p_capacity_kg) > 1000 THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Total capacity in this location would exceed 1000 kg.';
+    -- Pengecekan apakah kapasitas baru akan melebihi 1000 kg (limit)
+    IF (v_total_capacity + p_capacity_kg) > 1000.00 THEN 
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Total kapasitas di lokasi ini akan melebihi 1000 kg.';
     END IF;
 
-    INSERT INTO RECYCLEBIN(location_id, capacity_kg, bin_code)
-    VALUES (p_location_id, p_capacity_kg, p_bin_code);
+    -- Masukkan tempat sampah daur ulang baru
+    INSERT INTO RECYCLING_BIN( 
+        id, 
+        capacity_kg,
+        status, 
+        last_emptied,
+        qr_code,
+        bin_location_id
+    )
+    VALUES (
+        UUID(),
+        p_capacity_kg,
+        'available', 
+        NOW(),
+        p_qr_code,
+        p_bin_location_id
+    );
 END;
 //
 DELIMITER ;
@@ -178,28 +241,26 @@ DELIMITER ;
 -- sp_complete_redemption
 DELIMITER //
 
-CREATE PROCEDURE sp_complete_redemption(IN p_redemption_id INT)
+CREATE PROCEDURE sp_complete_redemption(
+    IN p_redemption_id CHAR(12)
+)
 BEGIN
-    DECLARE v_item_id INT;
+    DECLARE v_item_id CHAR(12);
 
+    -- Memeriksa apakah ID penukaran valid dan statusnya masih 'pending'
     SELECT reward_item_id INTO v_item_id
     FROM REWARDREDEMPTION
     WHERE id = p_redemption_id AND status = 'pending';
 
     IF v_item_id IS NULL THEN
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Redemption ID invalid or already processed.';
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ID Penukaran tidak valid atau sudah diproses.';
     END IF;
 
-    -- Mark as completed
+    -- Tandai penukaran sebagai 'completed' dan set tanggal proses
     UPDATE REWARDREDEMPTION
     SET status = 'completed',
         processed_date = NOW()
     WHERE id = p_redemption_id;
-
-    -- Decrease stock
-    UPDATE REWARD_ITEM
-    SET stock = stock - 1
-    WHERE id = v_item_id;
 END;
 //
 DELIMITER ;
