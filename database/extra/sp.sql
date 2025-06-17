@@ -59,32 +59,29 @@ DELIMITER $$
 
 CREATE PROCEDURE sp_laporkan_aktivitas_sampah(
     IN p_user_id CHAR(12),
-    IN p_recycling_bin_id CHAR(12), 
-    IN p_waste_type_id CHAR(12), 
-    IN p_weight_kg DECIMAL(5,2), 
-    IN p_admin_id CHAR(12), 
-    IN p_verification_staff CHAR(8)
+    IN p_recycling_bin_id CHAR(12),
+    IN p_waste_type_id CHAR(12),
+    IN p_weight_kg DECIMAL(5,2),
+    IN p_admin_id CHAR(12) 
 )
 BEGIN
-    -- Masukkan aktivitas daur ulang baru.
-    -- Trigger `trg_verifikasi_aktivitas_to_poin` akan menangani penambahan poin
     INSERT INTO RECYCLING_ACTIVITY (
-        id, 
+        id,
         weight_kg,
-        points_earned, 
+        points_earned,
         timestamp,
-        verification_staff,
+        verification_staff, 
         admin_id,
         user_id,
         waste_type_id,
         recycling_bin_id
     )
     VALUES (
-        UUID(), -- Generate a unique ID
+        UUID(),
         p_weight_kg,
-        0, -- Initial points can be 0, updated by trigger on verification
+        0, 
         NOW(),
-        p_verification_staff,
+        'pending', 
         p_admin_id,
         p_user_id,
         p_waste_type_id,
@@ -209,15 +206,12 @@ CREATE PROCEDURE sp_add_recycling_bin(
 BEGIN
     DECLARE v_total_capacity DECIMAL(6,2);
 
-    -- Mendapatkan total kapasitas tempat sampah yang sudah ada di lokasi ini
     SET v_total_capacity = hitung_kapasitas_total_lokasi(p_bin_location_id);
 
-    -- Pengecekan apakah kapasitas baru akan melebihi 1000 kg (limit)
     IF (v_total_capacity + p_capacity_kg) > 1000.00 THEN 
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Total kapasitas di lokasi ini akan melebihi 1000 kg.';
     END IF;
 
-    -- Masukkan tempat sampah daur ulang baru
     INSERT INTO RECYCLING_BIN( 
         id, 
         capacity_kg,
@@ -247,7 +241,6 @@ CREATE PROCEDURE sp_complete_redemption(
 BEGIN
     DECLARE v_item_id CHAR(12);
 
-    -- Memeriksa apakah ID penukaran valid dan statusnya masih 'pending'
     SELECT reward_item_id INTO v_item_id
     FROM REWARDREDEMPTION
     WHERE id = p_redemption_id AND status = 'pending';
@@ -258,9 +251,72 @@ BEGIN
 
     -- Tandai penukaran sebagai 'completed' dan set tanggal proses
     UPDATE REWARDREDEMPTION
-    SET status = 'completed',
+    SET status = 'processed',
         processed_date = NOW()
     WHERE id = p_redemption_id;
 END;
 //
+DELIMITER ;
+
+-- sp_verifikasi_aktivitas
+DELIMITER //
+
+CREATE PROCEDURE sp_verifikasi_aktivitas(
+    IN p_recycling_activity_id CHAR(12)
+)
+BEGIN
+    DECLARE v_current_status CHAR(8);
+
+    START TRANSACTION;
+
+    SELECT verification_staff INTO v_current_status
+    FROM RECYCLING_ACTIVITY
+    WHERE id = p_recycling_activity_id
+    FOR UPDATE; 
+
+    IF v_current_status IS NULL THEN
+        ROLLBACK;
+    ELSEIF v_current_status = 'verified' THEN
+        ROLLBACK;
+    ELSE
+        UPDATE RECYCLING_ACTIVITY
+        SET verification_staff = 'verified'
+        WHERE id = p_recycling_activity_id;
+
+        COMMIT;
+    END IF;
+END;
+//
+
+DELIMITER ;
+
+-- sp_tambah_stok_reward
+DELIMITER //
+
+CREATE PROCEDURE sp_tambah_stok_reward(
+    IN p_reward_id_item CHAR(12),
+    IN p_tambahan_stok INT
+)
+BEGIN
+    DECLARE v_stok_sekarang INT;
+
+    START TRANSACTION;
+
+    SELECT stock INTO v_stok_sekarang
+    FROM REWARD_ITEM
+    WHERE id = p_reward_id_item
+    FOR UPDATE; 
+
+    IF v_stok_sekarang IS NULL THEN
+        ROLLBACK;
+    ELSE
+        UPDATE REWARD_ITEM
+        SET stock = stock + p_tambahan_stok
+        WHERE id = p_reward_id_item;
+
+        COMMIT;
+    END IF;
+END;
+//
+
 DELIMITER ;

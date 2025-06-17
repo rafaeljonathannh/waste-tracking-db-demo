@@ -2,7 +2,7 @@
 
 namespace App;
 
-require_once __DIR__ . '/../config/database.php'; // Adjust path to your Database.php
+require_once __DIR__ . '/../config/database.php';
 
 use PDO;
 use PDOException;

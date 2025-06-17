@@ -310,13 +310,12 @@ include __DIR__ . '/layouts/header.php';
 
         fetch('?action=view_table&table=' + tableName)
             .then(response => {
-                // Log the raw response status and headers
                 console.log('Fetch Response Status:', response.status);
                 console.log('Fetch Response Headers:', [...response.headers.entries()]);
-                return response.json(); // Proceed to parse JSON
+                return response.json();
             })
             .then(data => {
-                console.log('Table data (parsed JSON):', data); // This is critical: inspect this object!
+                console.log('Table data (parsed JSON):', data);
 
                 if (data.success && Array.isArray(data.data) && data.data.length > 0) {
                     let html = '<h6>Table: ' + tableName + ' (' + data.count + ' rows)</h6>';
@@ -328,7 +327,6 @@ include __DIR__ . '/layouts/header.php';
                     });
                     html += '</tr></thead><tbody>';
 
-                    // Data rows (limit to 20 for display)
                     data.data.slice(0, 20).forEach(row => {
                         html += '<tr>';
                         Object.values(row).forEach(value => {
@@ -345,7 +343,7 @@ include __DIR__ . '/layouts/header.php';
                 } else {
                     let message = 'No data found.';
                     if (data.error) {
-                        message = 'Error: ' + htmlspecialchars(data.error); // Display backend error
+                        message = 'Error: ' + htmlspecialchars(data.error);
                     } else if (data.success === false) {
                         message = 'Operation failed with no specific error message.';
                     }
@@ -360,8 +358,8 @@ include __DIR__ . '/layouts/header.php';
 
 
     function htmlspecialchars(str) {
-        if (typeof str != 'string' && typeof str != 'number') return str; // Also handle numbers
-        str = String(str); // Ensure it's a string
+        if (typeof str != 'string' && typeof str != 'number') return str;
+        str = String(str);
         var map = {
             '&': '&amp;',
             '<': '&lt;',
@@ -374,7 +372,6 @@ include __DIR__ . '/layouts/header.php';
         });
     }
 
-    // Format result display - Now accepts routineName (function or procedure name)
     function formatResult(data, routineName = null) {
         if (!data) return '<div class="alert alert-danger">No response received</div>';
 
@@ -416,7 +413,13 @@ include __DIR__ . '/layouts/header.php';
                         html += '<div class="mb-2"><strong>Action:</strong> Tempat sampah daur ulang baru telah ditambahkan.</div>';
                         break;
                     case 'sp_complete_redemption':
-                        html += '<div class="mb-2"><strong>Action:</strong> Penukaran reward dengan ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code> telah ditandai sebagai \'completed\'.</div>';
+                        html += '<div class="mb-2"><strong>Action:</strong> Penukaran reward dengan ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code> telah ditandai sebagai \'processed\'.</div>';
+                        break;
+                    case 'sp_verifikasi_aktivitas':
+                        html += '<div class="mb-2"><strong>Action:</strong> Proses verifikasi aktivitas sampah telah dilakukan untuk ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code>. Cek tabel aktivitas atau log monitor untuk status akhir.</div>';
+                        break;
+                    case 'sp_tambah_stok_reward':
+                        html += '<div class="mb-2"><strong>Action:</strong> Permintaan penambahan stok reward telah diproses untuk ID <code>' + htmlspecialchars(data.params[0] || 'N/A') + '</code> dengan jumlah <code>' + htmlspecialchars(data.params[1] || 'N/A') + '</code>. Cek data Reward Item untuk stok terbaru.</div>';
                         break;
                     default:
                         html += '<div class="mb-2"><strong>Procedure Results:</strong> <pre class="p-2 bg-dark text-white rounded">' + htmlspecialchars(JSON.stringify(data.results, null, 2)) + '</pre></div>';

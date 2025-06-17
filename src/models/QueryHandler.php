@@ -120,12 +120,6 @@ class QueryHandler
         }
     }
 
-    /**
-     * Retrieves recent recycling activities.
-     *
-     * @param int $limit The maximum number of activities to return.
-     * @return array An array of recent activities, or an empty array on error.
-     */
     public function getRecentActivities($limit = 10)
     {
         try {
@@ -136,7 +130,6 @@ class QueryHandler
                     ORDER BY ra.timestamp DESC LIMIT ?";
 
             $stmt = $this->db->prepare($sql);
-            // Fix: Bind as integer for LIMIT
             $stmt->bindValue(1, (int)$limit, PDO::PARAM_INT);
             $stmt->execute();
 
@@ -148,12 +141,6 @@ class QueryHandler
         }
     }
 
-    /**
-     * Retrieves points history.
-     *
-     * @param int $limit The maximum number of points entries to return.
-     * @return array An array of points history entries, or an empty array on error.
-     */
     public function getPointsHistory($limit = 10)
     {
         try {
