@@ -1,6 +1,18 @@
 # Enable URL rewriting
 RewriteEngine On
 
+# API Routes
+RewriteCond %{REQUEST_URI} ^/api/
+RewriteRule ^api/(.*)$ /api/index.php [QSA,L]
+
+# Frontend Routes  
+RewriteCond %{REQUEST_URI} ^/frontend/
+RewriteRule ^frontend/(.*)$ /frontend/$1 [L]
+
+# Default PHP Routes
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php [QSA,L]
 # Redirect all requests to index.php if file/directory doesn't exist
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d

@@ -1687,7 +1687,7 @@ INSERT INTO POINTS (id, description, point, when_earn, status, user_id, recyclin
 (99, 'Poin dari daur ulang Paku Bekas', 746, '2025-06-05 09:00:00', 'pending', 'USR0099', 'RAC00000099'),
 (100, 'Poin dari daur ulang Tetra Pak', 126, '2025-06-15 12:00:00', 'earned', 'USR0100', 'RAC00000100');
 
--- DUMMY DATA FOR TABLE: REWARDREDEMPTION
+-- DUMMY DATA FOR TABLE: REWARDREDEMPTION   
 -- Note: point_spent corresponds to the points_required of the redeemed item.
 INSERT INTO REWARDREDEMPTION (id, point_spent, redemption_date, processed_date, status, user_id, reward_item_id) VALUES
 ('RDM00000001', 1000, '2024-11-01 15:00:00', '2024-11-01 15:05:00', 'processed', 'USR0004', 'RWD00000001'),
