@@ -1,16 +1,797 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reloop - Student Dashboard</title>
-    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- React & Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide React Icons (via CDN alternative) -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+    
+    <style>
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: .5;
+            }
+        }
+        
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            from {
+                transform: rotate(0deg);
+            }
+            to {
+                transform: rotate(360deg);
+            }
+        }
+        
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        
+        /* Glassmorphism effect */
+        .glass {
+            background: rgba(255, 255, 255, 0.25);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+    </style>
 </head>
-<body>
-    <div id="root"></div>
-    <script type="text/babel" src="src/StudentDashboard.jsx"></script>
+<body class="bg-gray-100">
+    <div id="root">
+        <!-- Loading placeholder -->
+        <div class="flex items-center justify-center min-h-screen">
+            <div class="text-center">
+                <div class="text-6xl mb-4">♻️</div>
+                <div class="text-xl font-bold text-gray-800 mb-2">Reloop</div>
+                <div class="text-gray-600 mb-4">Loading Student Dashboard...</div>
+                <div class="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- React Component -->
+    <script type="text/babel">
+        // Simple icon components using Unicode
+        const HomeIcon = () => <span>🏠</span>;
+        const RecycleIcon = () => <span>♻️</span>;
+        const GiftIcon = () => <span>🎁</span>;
+        const UsersIcon = () => <span>👥</span>;
+        const UserIcon = () => <span>👤</span>;
+        const BellIcon = () => <span>🔔</span>;
+        const ScanIcon = () => <span>📱</span>;
+        const TrendingUpIcon = () => <span>📈</span>;
+        const TrophyIcon = () => <span>🏆</span>;
+        const ClockIcon = () => <span>⏰</span>;
+        const MapPinIcon = () => <span>📍</span>;
+        const ChevronRightIcon = () => <span>➤</span>;
+        const PlusIcon = () => <span>➕</span>;
+
+        const StudentDashboard = () => {
+            const [activeTab, setActiveTab] = React.useState('dashboard');
+            const [showAddActivity, setShowAddActivity] = React.useState(false);
+            const [loading, setLoading] = React.useState(false);
+            const [notifications, setNotifications] = React.useState([]);
+            
+            const [user, setUser] = React.useState({
+                id: 1,
+                name: 'Ahmad Fauzi',
+                npm: '2023110001',
+                faculty: 'Teknik Informatika',
+                total_points: 1250,
+                status: 'active',
+                avatar: '🧑‍🎓'
+            });
+
+            const [stats, setStats] = React.useState({
+                thisMonth: 45,
+                totalActivities: 23,
+                redeemedRewards: 3,
+                campaignsJoined: 2
+            });
+
+            const [activities, setActivities] = React.useState([
+                {
+                    id: 1,
+                    waste_type: 'Plastik',
+                    weight: 2.5,
+                    points_earned: 25,
+                    status: 'verified',
+                    timestamp: '2025-06-20 14:30',
+                    location: 'Gedung A Lt.2'
+                },
+                {
+                    id: 2,
+                    waste_type: 'Kertas',
+                    weight: 1.8,
+                    points_earned: 18,
+                    status: 'pending',
+                    timestamp: '2025-06-19 10:15',
+                    location: 'Gedung B Lt.1'
+                }
+            ]);
+
+            const [rewards, setRewards] = React.useState([
+                {
+                    id: 1,
+                    name: 'Tumbler Eco-Friendly',
+                    points_cost: 500,
+                    stock: 12,
+                    image: '🥤',
+                    category: 'Drinkware'
+                },
+                {
+                    id: 2,
+                    name: 'Tote Bag Sustainability',
+                    points_cost: 300,
+                    stock: 8,
+                    image: '👜',
+                    category: 'Bags'
+                },
+                {
+                    id: 3,
+                    name: 'Voucher Kantin Rp.50k',
+                    points_cost: 800,
+                    stock: 5,
+                    image: '🎫',
+                    category: 'Voucher'
+                }
+            ]);
+
+            const [campaigns, setCampaigns] = React.useState([
+                {
+                    id: 1,
+                    title: 'Plastic Free June',
+                    description: 'Kurangi penggunaan plastik selama bulan Juni',
+                    participants: 156,
+                    end_date: '2025-06-30',
+                    status: 'active',
+                    joined: true
+                },
+                {
+                    id: 2,
+                    title: 'Paper Recycling Challenge',
+                    description: 'Kompetisi daur ulang kertas antar fakultas',
+                    participants: 89,
+                    end_date: '2025-07-15',
+                    status: 'active',
+                    joined: false
+                }
+            ]);
+
+            // API integration functions
+            const fetchUserData = React.useCallback(async () => {
+                try {
+                    const response = await fetch(`/waste-tracking-db-demo/api/user/${user.id}`);
+                    if (response.ok) {
+                        const userData = await response.json();
+                        setUser(prev => ({ ...prev, ...userData }));
+                        if (userData.stats) {
+                            setStats(userData.stats);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error fetching user data:', error);
+                }
+            }, [user.id]);
+
+            // Simulate real-time updates
+            React.useEffect(() => {
+                const interval = setInterval(() => {
+                    // Random point updates for demo
+                    if (Math.random() > 0.98) {
+                        setUser(prev => ({
+                            ...prev,
+                            total_points: prev.total_points + Math.floor(Math.random() * 25) + 5
+                        }));
+                        
+                        setNotifications(prev => [{
+                            type: 'points_updated',
+                            message: 'New recycling activity verified! Points added.',
+                            timestamp: new Date().toLocaleTimeString()
+                        }, ...prev.slice(0, 4)]);
+                    }
+                }, 5000);
+
+                return () => clearInterval(interval);
+            }, []);
+
+            const Sidebar = () => (
+                <div className="w-64 bg-gradient-to-b from-green-800 to-green-900 text-white p-6 flex flex-col min-h-screen">
+                    <div className="flex items-center gap-3 mb-8">
+                        <div className="text-2xl">♻️</div>
+                        <div>
+                            <h1 className="text-xl font-bold">Reloop</h1>
+                            <p className="text-green-200 text-sm">Student Portal</p>
+                        </div>
+                    </div>
+
+                    <nav className="space-y-2 flex-1">
+                        {[
+                            { id: 'dashboard', icon: HomeIcon, label: 'Dashboard' },
+                            { id: 'activities', icon: RecycleIcon, label: 'My Activities' },
+                            { id: 'rewards', icon: GiftIcon, label: 'Rewards Store' },
+                            { id: 'campaigns', icon: UsersIcon, label: 'Campaigns' },
+                            { id: 'profile', icon: UserIcon, label: 'Profile' }
+                        ].map(item => (
+                            <button
+                                key={item.id}
+                                onClick={() => setActiveTab(item.id)}
+                                className={`w-full flex items-center gap-3 p-3 rounded-lg transition-all ${
+                                    activeTab === item.id 
+                                        ? 'bg-white text-green-800 shadow-lg' 
+                                        : 'hover:bg-green-700'
+                                }`}
+                            >
+                                <item.icon />
+                                <span className="font-medium">{item.label}</span>
+                            </button>
+                        ))}
+                    </nav>
+
+                    <div className="bg-green-700 rounded-lg p-4 mt-6">
+                        <div className="flex items-center gap-3 mb-2">
+                            <TrophyIcon />
+                            <span className="font-semibold">Total Points</span>
+                        </div>
+                        <div className="text-2xl font-bold text-yellow-400">
+                            {user.total_points.toLocaleString()}
+                        </div>
+                        <div className="text-green-200 text-sm mt-1">
+                            {user.status === 'active' ? '✨ Active Member' : '💤 Inactive'}
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const DashboardContent = () => (
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-2xl font-bold text-gray-800">Welcome back, {user.name}! 👋</h2>
+                            <p className="text-gray-600">{user.npm} • {user.faculty}</p>
+                        </div>
+                        <button className="bg-green-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-green-700 transition-colors">
+                            <ScanIcon />
+                            Scan QR Code
+                        </button>
+                    </div>
+
+                    {/* Stats Cards */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                        <div className="bg-white rounded-xl p-6 shadow-lg border-l-4 border-blue-500">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Points This Month</p>
+                                    <p className="text-2xl font-bold text-gray-800">{stats.thisMonth}</p>
+                                </div>
+                                <TrendingUpIcon />
+                            </div>
+                        </div>
+                        
+                        <div className="bg-white rounded-xl p-6 shadow-lg border-l-4 border-green-500">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Total Activities</p>
+                                    <p className="text-2xl font-bold text-gray-800">{stats.totalActivities}</p>
+                                </div>
+                                <RecycleIcon />
+                            </div>
+                        </div>
+                        
+                        <div className="bg-white rounded-xl p-6 shadow-lg border-l-4 border-purple-500">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Rewards Redeemed</p>
+                                    <p className="text-2xl font-bold text-gray-800">{stats.redeemedRewards}</p>
+                                </div>
+                                <GiftIcon />
+                            </div>
+                        </div>
+                        
+                        <div className="bg-white rounded-xl p-6 shadow-lg border-l-4 border-orange-500">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <p className="text-gray-600 text-sm">Campaigns Joined</p>
+                                    <p className="text-2xl font-bold text-gray-800">{stats.campaignsJoined}</p>
+                                </div>
+                                <UsersIcon />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Quick Actions */}
+                    <div className="bg-white rounded-xl p-6 shadow-lg">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">Quick Actions</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <button 
+                                onClick={() => setShowAddActivity(true)}
+                                className="flex items-center gap-3 p-4 bg-green-50 rounded-lg hover:bg-green-100 transition-colors"
+                            >
+                                <PlusIcon />
+                                <span className="font-medium text-green-800">Add Recycling Activity</span>
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('rewards')}
+                                className="flex items-center gap-3 p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition-colors"
+                            >
+                                <GiftIcon />
+                                <span className="font-medium text-purple-800">Browse Rewards</span>
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('campaigns')}
+                                className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors"
+                            >
+                                <UsersIcon />
+                                <span className="font-medium text-blue-800">Join Campaign</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Recent Activities */}
+                    <div className="bg-white rounded-xl p-6 shadow-lg">
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-lg font-semibold text-gray-800">Recent Activities</h3>
+                            <button 
+                                onClick={() => setActiveTab('activities')}
+                                className="text-green-600 hover:text-green-700 flex items-center gap-1"
+                            >
+                                View all <ChevronRightIcon />
+                            </button>
+                        </div>
+                        <div className="space-y-3">
+                            {activities.slice(0, 3).map(activity => (
+                                <div key={activity.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
+                                            <RecycleIcon />
+                                        </div>
+                                        <div>
+                                            <p className="font-medium text-gray-800">{activity.waste_type}</p>
+                                            <p className="text-sm text-gray-600">{activity.weight}kg • {activity.location}</p>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                            activity.status === 'verified' 
+                                                ? 'bg-green-100 text-green-800' 
+                                                : 'bg-yellow-100 text-yellow-800'
+                                        }`}>
+                                            {activity.status === 'verified' ? '✅ Verified' : '⏳ Pending'}
+                                        </div>
+                                        <p className="text-sm text-gray-600 mt-1">+{activity.points_earned} pts</p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const ActivitiesContent = () => (
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                        <h2 className="text-2xl font-bold text-gray-800">My Recycling Activities</h2>
+                        <button 
+                            onClick={() => setShowAddActivity(true)}
+                            className="bg-green-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-green-700 transition-colors"
+                        >
+                            <PlusIcon />
+                            Add New Activity
+                        </button>
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-lg overflow-hidden">
+                        <div className="overflow-x-auto">
+                            <table className="w-full">
+                                <thead className="bg-gray-50 border-b">
+                                    <tr>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Date & Time</th>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Waste Type</th>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Weight (kg)</th>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Location</th>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Points</th>
+                                        <th className="text-left p-4 font-semibold text-gray-800">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {activities.map(activity => (
+                                        <tr key={activity.id} className="border-b hover:bg-gray-50">
+                                            <td className="p-4">
+                                                <div className="flex items-center gap-2">
+                                                    <ClockIcon />
+                                                    <span className="text-sm text-gray-600">{activity.timestamp}</span>
+                                                </div>
+                                            </td>
+                                            <td className="p-4 font-medium text-gray-800">{activity.waste_type}</td>
+                                            <td className="p-4 text-gray-600">{activity.weight}</td>
+                                            <td className="p-4">
+                                                <div className="flex items-center gap-1">
+                                                    <MapPinIcon />
+                                                    <span className="text-sm text-gray-600">{activity.location}</span>
+                                                </div>
+                                            </td>
+                                            <td className="p-4 font-semibold text-green-600">+{activity.points_earned}</td>
+                                            <td className="p-4">
+                                                <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                                                    activity.status === 'verified' 
+                                                        ? 'bg-green-100 text-green-800' 
+                                                        : 'bg-yellow-100 text-yellow-800'
+                                                }`}>
+                                                    {activity.status === 'verified' ? '✅ Verified' : '⏳ Pending'}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const RewardsContent = () => (
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                        <h2 className="text-2xl font-bold text-gray-800">Rewards Store</h2>
+                        <div className="flex items-center gap-4">
+                            <div className="text-right">
+                                <p className="text-sm text-gray-600">Available Points</p>
+                                <p className="text-xl font-bold text-green-600">{user.total_points.toLocaleString()}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {rewards.map(reward => (
+                            <div key={reward.id} className="bg-white rounded-xl shadow-lg overflow-hidden hover:shadow-xl transition-shadow">
+                                <div className="p-6">
+                                    <div className="text-center mb-4">
+                                        <div className="text-4xl mb-2">{reward.image}</div>
+                                        <h3 className="text-lg font-semibold text-gray-800">{reward.name}</h3>
+                                        <p className="text-sm text-gray-600">{reward.category}</p>
+                                    </div>
+                                    
+                                    <div className="space-y-3">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-gray-600">Points Required:</span>
+                                            <span className="font-bold text-green-600">{reward.points_cost}</span>
+                                        </div>
+                                        
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-gray-600">Stock:</span>
+                                            <span className={`font-medium ${reward.stock > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                {reward.stock > 0 ? `${reward.stock} available` : 'Out of stock'}
+                                            </span>
+                                        </div>
+                                        
+                                        <button 
+                                            disabled={reward.stock === 0 || user.total_points < reward.points_cost}
+                                            className={`w-full py-2 px-4 rounded-lg font-medium transition-colors ${
+                                                reward.stock > 0 && user.total_points >= reward.points_cost
+                                                    ? 'bg-green-600 text-white hover:bg-green-700'
+                                                    : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                            }`}
+                                        >
+                                            {reward.stock === 0 ? 'Out of Stock' : 
+                                             user.total_points < reward.points_cost ? 'Not Enough Points' : 'Redeem Now'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            const CampaignsContent = () => (
+                <div className="space-y-6">
+                    <div className="flex items-center justify-between">
+                        <h2 className="text-2xl font-bold text-gray-800">Sustainability Campaigns</h2>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        {campaigns.map(campaign => (
+                            <div key={campaign.id} className="bg-white rounded-xl shadow-lg p-6">
+                                <div className="flex items-start justify-between mb-4">
+                                    <div>
+                                        <h3 className="text-lg font-semibold text-gray-800">{campaign.title}</h3>
+                                        <p className="text-gray-600 text-sm mt-1">{campaign.description}</p>
+                                    </div>
+                                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                                        campaign.joined 
+                                            ? 'bg-green-100 text-green-800' 
+                                            : 'bg-blue-100 text-blue-800'
+                                    }`}>
+                                        {campaign.joined ? '✅ Joined' : '👥 Available'}
+                                    </span>
+                                </div>
+                                
+                                <div className="space-y-3">
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-gray-600">Participants:</span>
+                                        <span className="font-medium">{campaign.participants} students</span>
+                                    </div>
+                                    
+                                    <div className="flex items-center justify-between text-sm">
+                                        <span className="text-gray-600">Ends:</span>
+                                        <span className="font-medium">{campaign.end_date}</span>
+                                    </div>
+                                    
+                                    <button 
+                                        disabled={campaign.joined}
+                                        className={`w-full py-2 px-4 rounded-lg font-medium transition-colors ${
+                                            campaign.joined
+                                                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                                : 'bg-blue-600 text-white hover:bg-blue-700'
+                                        }`}
+                                    >
+                                        {campaign.joined ? 'Already Joined' : 'Join Campaign'}
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+
+            const ProfileContent = () => (
+                <div className="space-y-6">
+                    <h2 className="text-2xl font-bold text-gray-800">My Profile</h2>
+                    
+                    <div className="bg-white rounded-xl shadow-lg p-6">
+                        <div className="flex items-center gap-6 mb-6">
+                            <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center text-4xl">
+                                {user.avatar}
+                            </div>
+                            <div>
+                                <h3 className="text-xl font-semibold text-gray-800">{user.name}</h3>
+                                <p className="text-gray-600">{user.npm}</p>
+                                <p className="text-gray-600">{user.faculty}</p>
+                                <div className={`mt-2 px-3 py-1 rounded-full text-xs font-medium inline-block ${
+                                    user.status === 'active' 
+                                        ? 'bg-green-100 text-green-800' 
+                                        : 'bg-gray-100 text-gray-800'
+                                }`}>
+                                    {user.status === 'active' ? '✨ Active Member' : '💤 Inactive Member'}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div className="text-center p-4 bg-green-50 rounded-lg">
+                                <div className="text-2xl font-bold text-green-600">{user.total_points}</div>
+                                <div className="text-sm text-gray-600">Total Points</div>
+                            </div>
+                            <div className="text-center p-4 bg-blue-50 rounded-lg">
+                                <div className="text-2xl font-bold text-blue-600">{stats.totalActivities}</div>
+                                <div className="text-sm text-gray-600">Activities</div>
+                            </div>
+                            <div className="text-center p-4 bg-purple-50 rounded-lg">
+                                <div className="text-2xl font-bold text-purple-600">{stats.redeemedRewards}</div>
+                                <div className="text-sm text-gray-600">Rewards</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const AddActivityModal = () => {
+                const [formData, setFormData] = React.useState({
+                    waste_type: '',
+                    weight: '',
+                    location: '',
+                    notes: ''
+                });
+
+                const handleSubmit = async (e) => {
+                    e.preventDefault();
+                    setLoading(true);
+                    
+                    try {
+                        await new Promise(resolve => setTimeout(resolve, 1500));
+                        
+                        const newActivity = {
+                            id: activities.length + 1,
+                            waste_type: formData.waste_type,
+                            weight: parseFloat(formData.weight),
+                            points_earned: Math.floor(parseFloat(formData.weight) * 10),
+                            status: 'pending',
+                            timestamp: new Date().toLocaleString(),
+                            location: formData.location
+                        };
+                        
+                        setActivities(prev => [newActivity, ...prev]);
+                        setShowAddActivity(false);
+                        setFormData({ waste_type: '', weight: '', location: '', notes: '' });
+                        
+                        setNotifications(prev => [{
+                            type: 'activity_added',
+                            message: 'Recycling activity submitted for verification!',
+                            timestamp: new Date().toLocaleTimeString()
+                        }, ...prev.slice(0, 4)]);
+                        
+                    } catch (error) {
+                        console.error('Error adding activity:', error);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+
+                if (!showAddActivity) return null;
+
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                        <div className="bg-white rounded-xl max-w-md w-full p-6">
+                            <div className="flex items-center justify-between mb-6">
+                                <h3 className="text-xl font-bold text-gray-800">Add Recycling Activity</h3>
+                                <button 
+                                    onClick={() => setShowAddActivity(false)}
+                                    className="text-gray-500 hover:text-gray-700"
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                            
+                            <form onSubmit={handleSubmit} className="space-y-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Waste Type *
+                                    </label>
+                                    <select 
+                                        value={formData.waste_type}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, waste_type: e.target.value }))}
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                                        required
+                                    >
+                                        <option value="">Select waste type</option>
+                                        <option value="Plastik">Plastik (10 pts/kg)</option>
+                                        <option value="Kertas">Kertas (8 pts/kg)</option>
+                                        <option value="Logam">Logam (15 pts/kg)</option>
+                                        <option value="Kaca">Kaca (12 pts/kg)</option>
+                                        <option value="Organik">Organik (5 pts/kg)</option>
+                                    </select>
+                                </div>
+                                
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Weight (kg) *
+                                    </label>
+                                    <input 
+                                        type="number"
+                                        step="0.1"
+                                        min="0.1"
+                                        value={formData.weight}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, weight: e.target.value }))}
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                                        placeholder="Enter weight in kg"
+                                        required
+                                    />
+                                </div>
+                                
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Location *
+                                    </label>
+                                    <select 
+                                        value={formData.location}
+                                        onChange={(e) => setFormData(prev => ({ ...prev, location: e.target.value }))}
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                                        required
+                                    >
+                                        <option value="">Select location</option>
+                                        <option value="Gedung A Lt.1">Gedung A Lt.1</option>
+                                        <option value="Gedung A Lt.2">Gedung A Lt.2</option>
+                                        <option value="Gedung B Lt.1">Gedung B Lt.1</option>
+                                        <option value="Gedung C Lt.3">Gedung C Lt.3</option>
+                                        <option value="Kantin Utama">Kantin Utama</option>
+                                    </select>
+                                </div>
+                                
+                                <div className="flex gap-3 pt-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowAddActivity(false)}
+                                        className="flex-1 py-3 px-4 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={loading}
+                                        className="flex-1 py-3 px-4 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                                    >
+                                        {loading ? (
+                                            <>
+                                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                                Submitting...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <PlusIcon />
+                                                Add Activity
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderContent = () => {
+                switch (activeTab) {
+                    case 'dashboard': return <DashboardContent />;
+                    case 'activities': return <ActivitiesContent />;
+                    case 'rewards': return <RewardsContent />;
+                    case 'campaigns': return <CampaignsContent />;
+                    case 'profile': return <ProfileContent />;
+                    default: return <DashboardContent />;
+                }
+            };
+
+            return (
+                <div className="flex min-h-screen bg-gray-100">
+                    <Sidebar />
+                    <main className="flex-1 overflow-auto">
+                        <div className="p-6">
+                            {renderContent()}
+                        </div>
+                    </main>
+                    
+                    <AddActivityModal />
+                    
+                    {/* Real-time notification */}
+                    {notifications.length > 0 && (
+                        <div className="fixed top-4 right-4 max-w-sm z-50">
+                            <div className="bg-green-600 text-white p-4 rounded-lg shadow-lg flex items-center gap-3 animate-pulse">
+                                <BellIcon />
+                                <div>
+                                    <p className="font-medium">Real-time Active!</p>
+                                    <p className="text-sm opacity-90">Dashboard auto-updates every 5s</p>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        // Render the app
+        ReactDOM.render(<StudentDashboard />, document.getElementById('root'));
+    </script>
 </body>
 </html>
