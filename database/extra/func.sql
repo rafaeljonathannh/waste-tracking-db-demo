@@ -1,7 +1,7 @@
 -- Cek Apakah Mahasiswa Mengikuti Kampanye Tertentu
 DELIMITER $$
 
-FUNCTION `cek_partisipasi_kampanye`(user_id_input CHAR(12), campaign_id_input CHAR(12)) RETURNS tinyint(1)
+CREATE FUNCTION `cek_partisipasi_kampanye`(user_id_input CHAR(12), campaign_id_input CHAR(12)) RETURNS tinyint(1)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah INT DEFAULT 0;
@@ -18,7 +18,7 @@ DELIMITER ;
 -- Cek Status Mahasiswa
 DELIMITER $$
 
-FUNCTION `dapatkan_status_user`(user_id_input CHAR(12)) RETURNS varchar(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci
+CREATE FUNCTION `dapatkan_status_user`(user_id_input CHAR(12)) RETURNS varchar(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci
     DETERMINISTIC
 BEGIN
    DECLARE status_hasil VARCHAR(20);
@@ -35,7 +35,7 @@ DELIMITER ;
 -- fn_hitung_diskon_reward
 DELIMITER $$
 
-FUNCTION `hitung_diskon_reward`(status_input VARCHAR(20), poin_awal INT) RETURNS int(11)
+CREATE FUNCTION `hitung_diskon_reward`(status_input VARCHAR(20), poin_awal INT) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    IF status_input = 'active' THEN
@@ -50,7 +50,7 @@ DELIMITER ;
 -- Jumlah Kampanye yang Diikuti Mahasiswa
 DELIMITER $$
 
-FUNCTION `hitung_jumlah_kampanye_diikuti`(user_id_input CHAR(12)) RETURNS int(11)
+CREATE FUNCTION `hitung_jumlah_kampanye_diikuti`(user_id_input CHAR(12)) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah_kampanye INT DEFAULT 0;
@@ -68,7 +68,7 @@ DELIMITER ;
 -- Total Penukaran Reward Mahasiswa
 DELIMITER $$
 
-FUNCTION `hitung_jumlah_reward_ditukar`(user_id_input CHAR(12)) RETURNS int(11)
+CREATE FUNCTION `hitung_jumlah_reward_ditukar`(user_id_input CHAR(12)) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah_reward INT DEFAULT 0;
@@ -86,7 +86,7 @@ DELIMITER ;
 -- Total Kampanye yang Dibuat oleh Staff
 DELIMITER $$
 
-FUNCTION `hitung_kampanye_dibuat_staff`(staff_id_input INT) RETURNS int(11)
+CREATE FUNCTION `hitung_kampanye_dibuat_staff`(staff_id_input INT) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah_kampanye INT DEFAULT 0;
@@ -104,7 +104,7 @@ DELIMITER ;
 -- Total Jumlah Koordinator Keberlanjutan per Fakultas
 DELIMITER $$
 
-FUNCTION `hitung_kampanye_per_koordinator`(koordinator_id_input CHAR(12)) RETURNS int(11)
+CREATE FUNCTION `hitung_kampanye_per_koordinator`(koordinator_id_input CHAR(12)) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah_kampanye INT DEFAULT 0;
@@ -122,7 +122,7 @@ DELIMITER ;
 -- Kapasitas Total Tempat Sampah di Lokasi Tertentu
 DELIMITER $$
 
-FUNCTION `hitung_kapasitas_total_lokasi`(lokasi_id_input CHAR(12)) RETURNS decimal(10,2)
+CREATE FUNCTION `hitung_kapasitas_total_lokasi`(lokasi_id_input CHAR(12)) RETURNS decimal(10,2)
     DETERMINISTIC
 BEGIN
    DECLARE total_kapasitas DECIMAL(10,2) DEFAULT 0;
@@ -140,7 +140,7 @@ DELIMITER ;
 -- Total Poin Mahasiswa dari Semua Kampanye
 DELIMITER $$
 
-FUNCTION `hitung_total_poin_user`(user_id_input CHAR(12)) RETURNS int(11)
+CREATE FUNCTION `hitung_total_poin_user`(user_id_input CHAR(12)) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE total_poin INT DEFAULT 0;
@@ -158,7 +158,7 @@ DELIMITER ;
 -- Jumlah Sampah yang Disetor oleh Mahasiswa
 DELIMITER $$
 
-FUNCTION `hitung_total_sampah_disetor`(user_id_input CHAR(12)) RETURNS decimal(10,2)
+CREATE FUNCTION `hitung_total_sampah_disetor`(user_id_input CHAR(12)) RETURNS decimal(10,2)
     DETERMINISTIC
 BEGIN
    DECLARE total_berat DECIMAL(10,2) DEFAULT 0;
@@ -176,7 +176,7 @@ DELIMITER ;
 -- Jumlah Mahasiswa Aktif di Fakultas
 DELIMITER $$
 
-FUNCTION `hitung_user_aktif_per_fakultas`(fakultas_id_input CHAR(12)) RETURNS int(11)
+CREATE FUNCTION `hitung_user_aktif_per_fakultas`(fakultas_id_input CHAR(12)) RETURNS int(11)
     DETERMINISTIC
 BEGIN
    DECLARE jumlah_user INT DEFAULT 0;
@@ -194,7 +194,8 @@ DELIMITER ;
 -- fn_konversi_berat_ke_poin
 DELIMITER $$
 
-FUNCTION `konversi_berat_ke_poin`(berat_kg DECIMAL(5,2)) RETURNS int(11)
+CREATE FUNCTION `konversi_berat_ke_poin`(berat_kg DECIMAL(5,2)) 
+RETURNS int(11)
     DETERMINISTIC
 BEGIN
    RETURN ROUND(berat_kg * 10);
