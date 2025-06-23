@@ -78,7 +78,7 @@ BEGIN
     )
     VALUES (
         p_weight_kg,
-        0,
+        konversi_berat_ke_poin(p_weight_kg),
         NOW(),
         'pending',
         p_admin_id,
