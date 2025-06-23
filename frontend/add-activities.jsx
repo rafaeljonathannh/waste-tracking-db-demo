@@ -6,7 +6,7 @@ import { Icon } from './icon'; // Import Icon utility
 // -------------------------------------------------------------------------------- //
 // 7. Add Activity Modal Component
 // -------------------------------------------------------------------------------- //
-const AddActivityModal = () => {
+const AddActivities = () => {
     // Access global variable for app ID.
     const __app_id = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
     
@@ -136,4 +136,4 @@ const AddActivityModal = () => {
     );
 };
 
-export default AddActivityModal;
+export default AddActivities;

@@ -5,7 +5,7 @@ import { Icon } from './icon'; // Import Icon utility
 // -------------------------------------------------------------------------------- //
 // 6. Profile Content Component
 // -------------------------------------------------------------------------------- //
-const ProfileContent = () => {
+const Profile = () => {
     // Access context values
     const { auth, userId } = useContext(AppContext);
 
@@ -65,4 +65,4 @@ const ProfileContent = () => {
     );
 };
 
-export default ProfileContent;
+export default Profile;

@@ -6,7 +6,7 @@ import { Icon } from './icon'; // Import Icon utility
 // -------------------------------------------------------------------------------- //
 // 4. Rewards Content Component
 // -------------------------------------------------------------------------------- //
-const RewardsContent = () => {
+const Rewards = () => {
     // Access global variable for app ID.
     const __app_id = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
     
@@ -79,4 +79,4 @@ const RewardsContent = () => {
     );
 };
 
-export default RewardsContent;
+export default Rewards;

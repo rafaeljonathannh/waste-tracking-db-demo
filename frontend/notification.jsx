@@ -5,7 +5,7 @@ import { Icon } from './icon'; // Import Icon utility
 // -------------------------------------------------------------------------------- //
 // 8. Notification Toast Component
 // -------------------------------------------------------------------------------- //
-const NotificationToast = () => {
+const Notification = () => {
     // Access context values
     const { notifications, removeNotification } = useContext(AppContext);
 
@@ -40,4 +40,4 @@ const NotificationToast = () => {
     );
 };
 
-export default NotificationToast;
+export default Notification;

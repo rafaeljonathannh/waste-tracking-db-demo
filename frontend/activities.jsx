@@ -3,10 +3,7 @@ import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
 import { AppContext } from './app-context'; // Import AppContext
 import { Icon } from './icon'; // Import Icon utility
 
-// -------------------------------------------------------------------------------- //
-// 3. Activity Content Component (for 'Activities' page)
-// -------------------------------------------------------------------------------- //
-const ActivitiesContent = () => {
+const Activities = () => {
     // Access global variable for app ID.
     const __app_id = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
     
@@ -101,4 +98,4 @@ const ActivitiesContent = () => {
     );
 };
 
-export default ActivitiesContent;
+export default Activities;

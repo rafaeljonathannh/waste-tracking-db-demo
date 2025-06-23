@@ -6,7 +6,7 @@ import { Icon } from './icon'; // Import Icon utility
 // -------------------------------------------------------------------------------- //
 // 2. Dashboard Content Component
 // -------------------------------------------------------------------------------- //
-const DashboardContent = () => {
+const Dashboard = () => {
     // Access global variable for app ID.
     const __app_id = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
     
@@ -141,4 +141,4 @@ const DashboardContent = () => {
     );
 };
 
-export default DashboardContent;
+export default Dashboard;
