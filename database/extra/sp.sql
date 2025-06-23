@@ -48,7 +48,6 @@ BEGIN
     WHERE id = p_user_id;
 
     -- 7. Insert redemption log
-    -- Remove UUID() here; the trigger tg_rewardredemption_autogen_id will handle the ID.
     INSERT INTO REWARDREDEMPTION (user_id, reward_item_id, point_spent, redemption_date, status)
     VALUES (p_user_id, p_reward_item_id, v_discounted_points, NOW(), 'pending');
 END;

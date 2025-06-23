@@ -99,19 +99,6 @@ include __DIR__ . '/layouts/header.php';
                                         </div>
 
                                         <button type="submit" class="btn btn-primary">Execute Function</button>
-
-                                        <div class="mt-3">
-                                            <h6>Quick Tests:</h6>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('hitung_total_poin_user', 'USR000000001')">
-                                                hitung_total_poin_user('USR000000001')
-                                            </button>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('hitung_jumlah_kampanye_diikuti', 'USR000000001')">
-                                                hitung_jumlah_kampanye_diikuti('USR000000001')
-                                            </button>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="quickTestFunction('dapatkan_status_user', 'USR000000001')">
-                                                dapatkan_status_user('USR000000001')
-                                            </button>
-                                        </div>
                                     </form>
                                 </div>
                                 <div class="col-md-6">
