@@ -23,7 +23,7 @@ class Functions
         return [
             'cek_partisipasi_kampanye'         => 'Cek Partisipasi Pengguna dalam Kampanye (user_id CHAR(12), sustainability_campaign_id CHAR(12))',
             'dapatkan_status_user'            => 'Dapatkan Status Pengguna (user_id CHAR(12))',
-            'hitung_diskon_reward'            => 'Hitung Diskon Reward (reward_status CHAR(12), user_total_points INT)', // Assuming parameters based on common logic
+            'hitung_diskon_reward'            => 'Hitung Diskon Reward (status_user CHAR(12), user_total_points INT)', // Assuming parameters based on common logic
             'hitung_jumlah_kampanye_diikuti'  => 'Hitung Jumlah Kampanye Diikuti Pengguna (user_id CHAR(12))',
             'hitung_jumlah_reward_ditukar'    => 'Hitung Jumlah Reward Ditukar Pengguna (user_id CHAR(12))',
             'hitung_kampanye_dibuat_staff'    => 'Hitung Kampanye Dibuat Staff (staff_id CHAR(12))',

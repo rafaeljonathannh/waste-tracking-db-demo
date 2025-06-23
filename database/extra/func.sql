@@ -86,17 +86,17 @@ DELIMITER ;
 -- Total Kampanye yang Dibuat oleh Staff
 DELIMITER $$
 
-CREATE FUNCTION `hitung_kampanye_dibuat_staff`(staff_id_input INT) RETURNS int(11)
-    DETERMINISTIC
+CREATE FUNCTION `hitung_kampanye_dibuat_staff`(staff_id_input VARCHAR(20)) RETURNS INT
+DETERMINISTIC
 BEGIN
-   DECLARE jumlah_kampanye INT DEFAULT 0;
+    DECLARE jumlah_kampanye INT DEFAULT 0;
 
-   SELECT COUNT(*)
-   INTO jumlah_kampanye
-   FROM SUSTAINABILITY_CAMPAIGN
-   WHERE created_by = staff_id_input;
+    SELECT COUNT(*)
+    INTO jumlah_kampanye
+    FROM SUSTAINABILITY_CAMPAIGN
+    WHERE created_by = staff_id_input;
 
-   RETURN jumlah_kampanye;
+    RETURN jumlah_kampanye;
 END$$
 
 DELIMITER ;
